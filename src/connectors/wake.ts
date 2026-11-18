@@ -185,6 +185,7 @@ export class ConnectorWakeScheduler {
           until,
           limit: config.poll.maxRecordsPerPoll,
           lookaheadMinutes: config.wake.calendarLookaheadMinutes,
+          timezone: this.opts.proactive.timezone,
         })
         drafts.push(...fetched)
         // Advance from the poll start, not the newest record: a provider with

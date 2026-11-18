@@ -15,7 +15,8 @@ import {
 } from '../src/connectors/wake.ts'
 import { normalizeConnectorConfig } from '../src/connectors/config.ts'
 import { ConnectorIndex } from '../src/connectors/index-store.ts'
-import type { GoogleWorkspaceApi } from '../src/connectors/google.ts'
+import { HttpGoogleWorkspaceApi, type GoogleWorkspaceApi } from '../src/connectors/google.ts'
+import type { FetchLike } from '../src/connectors/oauth.ts'
 import type { ConnectorDraft } from '../src/connectors/types.ts'
 import type { Disposition, Ticket, Trigger } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -390,5 +391,57 @@ describe('connector wake scheduler', () => {
     expect(prompt).toContain('message=CONNECTOR_EVENT')
     expect(prompt).toContain('Do not send an acknowledgement')
     expect(prompt).toContain('call assess_trigger kind=stop')
+  })
+})
+
+describe('review fixes (PR #174)', () => {
+  it('wakes once for an open task due today in the owner timezone, not on every poll', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    // Tasks v1 semantics: `due` is a date at 00:00:00Z and the server applies
+    // `updatedMin` / `dueMin` / `dueMax`.
+    const tasks = [{
+      id: 't-rent',
+      title: 'Pay rent',
+      due: '2026-11-05T00:00:00.000Z',
+      status: 'needsAction',
+      updated: '2026-11-01T09:00:00.000Z',
+    }]
+    const fetchImpl: FetchLike = async input => {
+      const url = new URL(String(input))
+      const bound = (key: string) => {
+        const value = url.searchParams.get(key)
+        return value === null ? undefined : Date.parse(value)
+      }
+      const items = tasks.filter(task => {
+        const updatedMin = bound('updatedMin')
+        const dueMin = bound('dueMin')
+        const dueMax = bound('dueMax')
+        if (updatedMin !== undefined && Date.parse(task.updated) < updatedMin) return false
+        if (dueMin !== undefined && Date.parse(task.due) < dueMin) return false
+        if (dueMax !== undefined && Date.parse(task.due) > dueMax) return false
+        return true
+      })
+      return new Response(JSON.stringify({ items }), { status: 200 })
+    }
+    const api = new HttpGoogleWorkspaceApi(
+      { accessToken: async () => 'token', invalidate: () => undefined },
+      { fetch: fetchImpl, now: () => T0, apiBase: 'https://example.test' },
+    )
+    const { runner, fired } = scheduler({
+      store,
+      index,
+      api,
+      config: { google: { services: ['tasks'] }, wake: { services: ['tasks'] } },
+      // T0 is 18:00 in Shanghai, outside the default quiet window.
+      quiet: { quietStart: '23:00', quietEnd: '08:00', timezone: 'Asia/Shanghai' },
+    })
+    expect((await runner.poll(T0)).action).toBe('backfill')
+    const due = await runner.poll(T0 + 16 * MIN)
+    expect(due.action).toBe('wake')
+    expect(fired[0]?.text).toContain('reason=task due soon')
+    expect(fired[0]?.text).toContain('fact=Pay rent')
+    expect((await runner.poll(T0 + 32 * MIN)).action).toBe('silent')
+    expect(fired).toHaveLength(1)
   })
 })

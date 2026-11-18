@@ -218,3 +218,113 @@ describe('Google Workspace mapping', () => {
     })
   })
 })
+
+/** Drive v3 only returns `lastModifyingUser.me` when the `fields` mask asks for it. */
+function fakeDriveFetch(files: Record<string, unknown>[]): FetchLike {
+  return async input => {
+    const fields = new URL(String(input)).searchParams.get('fields') ?? ''
+    const wantsMe = /lastModifyingUser\([^)]*\bme\b/.test(fields)
+    return new Response(JSON.stringify({
+      files: files.map(file => {
+        const { me, ...editor } = file.lastModifyingUser as Record<string, unknown>
+        return { ...file, lastModifyingUser: wantsMe ? { ...editor, me } : editor }
+      }),
+    }), { status: 200 })
+  }
+}
+
+/** Tasks v1 filters `updatedMin` / `dueMin` / `dueMax` server-side; `due` is a date at 00:00:00Z. */
+function fakeTasksFetch(items: Record<string, unknown>[], seen: URL[] = []): FetchLike {
+  return async input => {
+    const url = new URL(String(input))
+    seen.push(url)
+    const bound = (key: string) => {
+      const value = url.searchParams.get(key)
+      return value === null ? undefined : Date.parse(value)
+    }
+    const updatedMin = bound('updatedMin')
+    const dueMin = bound('dueMin')
+    const dueMax = bound('dueMax')
+    const out = items.filter(item => {
+      const updated = Date.parse(String(item.updated))
+      const due = typeof item.due === 'string' ? Date.parse(item.due) : Number.NaN
+      if (updatedMin !== undefined && !(updated >= updatedMin)) return false
+      if (dueMin !== undefined && !(due >= dueMin)) return false
+      if (dueMax !== undefined && !(due <= dueMax)) return false
+      return true
+    })
+    return new Response(JSON.stringify({ items: out }), { status: 200 })
+  }
+}
+
+describe('review fixes (PR #174)', () => {
+  it('judges "changed by another person" by the requesting user, not the file owner', async () => {
+    const shared = {
+      mimeType: 'application/vnd.google-apps.document',
+      modifiedTime: new Date(T0 - 10 * 60_000).toISOString(),
+      shared: true,
+    }
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fakeDriveFetch([
+        // Bob's doc, last edited by the connected user: not someone else's change.
+        {
+          ...shared,
+          id: 'doc-bob-edited-by-me',
+          name: 'Q4 plan',
+          owners: [{ emailAddress: 'bob@corp.example' }],
+          lastModifyingUser: { emailAddress: 'me@corp.example', me: true },
+        },
+        // Shared-drive item: Drive returns no `owners`; Carol changed it.
+        {
+          ...shared,
+          id: 'doc-shared-drive',
+          name: 'Team handbook',
+          lastModifyingUser: { emailAddress: 'carol@corp.example', me: false },
+        },
+        // The connected user's own doc, changed by Bob: still wakes.
+        {
+          ...shared,
+          id: 'doc-mine-edited-by-bob',
+          name: 'My notes',
+          owners: [{ emailAddress: 'me@corp.example' }],
+          lastModifyingUser: { emailAddress: 'bob@corp.example', me: false },
+        },
+      ]),
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+    const docs = await api.fetch('docs', query())
+    const wake = Object.fromEntries(docs.map(doc => [doc.externalId, doc.wake]))
+    expect(wake).toEqual({
+      'doc-bob-edited-by-me': false,
+      'doc-shared-drive': true,
+      'doc-mine-edited-by-bob': true,
+    })
+  })
+
+  it('wakes for an open task due today even when it was created before the poll cursor', async () => {
+    const seen: URL[] = []
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fakeTasksFetch([
+        { id: 't-today', title: 'Pay rent', due: '2026-11-05T00:00:00.000Z', status: 'needsAction', updated: '2026-11-01T09:00:00.000Z' },
+        { id: 't-tomorrow', title: 'Book flights', due: '2026-11-06T00:00:00.000Z', status: 'needsAction', updated: '2026-11-01T09:00:00.000Z' },
+        { id: 't-yesterday', title: 'Old errand', due: '2026-11-04T00:00:00.000Z', status: 'needsAction', updated: '2026-11-01T09:00:00.000Z' },
+        { id: 't-edited', title: 'Undated idea', status: 'needsAction', updated: new Date(T0 - 5 * 60_000).toISOString() },
+      ], seen),
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+    // T0 is 18:00 in Asia/Shanghai; the cursor only looks back 20 minutes.
+    const tasks = await api.fetch('tasks', query({
+      since: new Date(T0 - 20 * 60_000).toISOString(),
+      timezone: 'Asia/Shanghai',
+    }))
+    const wake = Object.fromEntries(tasks.map(task => [task.externalId, task.wake]))
+    expect(wake['t-today']).toBe(true)
+    expect(wake['t-tomorrow']).not.toBe(true)
+    expect(wake['t-yesterday']).not.toBe(true)
+    // Recently changed tasks are still indexed.
+    expect(wake['t-edited']).toBe(false)
+    expect(tasks.find(task => task.externalId === 't-today')?.wakeReason).toBe('task due soon')
+  })
+})

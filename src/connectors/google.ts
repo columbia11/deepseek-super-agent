@@ -1,3 +1,4 @@
+import { dayKey } from '../harness/proactive.ts'
 import { oneLine, type ConnectorDraft, type GoogleService } from './types.ts'
 import type { GoogleTokenProvider } from './oauth.ts'
 import type { FetchLike } from './oauth.ts'
@@ -20,6 +21,8 @@ export interface GoogleFetchQuery {
   limit: number
   /** Imminent-event / due-task window. */
   lookaheadMinutes: number
+  /** Owner timezone (`proactive.json`) for date-only task due dates; default UTC. */
+  timezone?: string
   signal?: AbortSignal
 }
 
@@ -38,7 +41,7 @@ export interface HttpGoogleWorkspaceApiOptions {
 const API_BASE = 'https://www.googleapis.com'
 const DRIVE_FIELDS = [
   'files(id,name,description,mimeType,modifiedTime,createdTime,webViewLink,shared,trashed',
-  'owners(emailAddress,displayName),lastModifyingUser(emailAddress,displayName))',
+  'owners(emailAddress,displayName),lastModifyingUser(me,emailAddress,displayName))',
 ].join(',')
 const DOC_MIME: Partial<Record<GoogleService, string>> = {
   docs: 'application/vnd.google-apps.document',
@@ -190,9 +193,13 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       const modifiedAt = str(file.modifiedTime)
       if (!id || !modifiedAt) continue
       const ownerEmail = str(record(arrayOf(file, 'owners')[0]).emailAddress)
-      const lastEditor = str(record(file.lastModifyingUser).emailAddress)
+      const editor = record(file.lastModifyingUser)
+      const lastEditor = str(editor.emailAddress)
       const shared = file.shared === true
-      const changedByOther = Boolean(lastEditor) && Boolean(ownerEmail) && lastEditor !== ownerEmail
+      // "Another person" means not the connected account. The file owner is
+      // not that account for files shared with the owner, and shared-drive
+      // items carry no `owners` at all; Drive's `me` flag answers directly.
+      const changedByOther = Boolean(lastEditor) && editor.me !== true
       const wanted = Boolean(mime) && shared && changedByOther
       const name = oneLine(str(file.name) ?? 'Untitled file', 180)
       const description = str(file.description) ?? ''
@@ -220,23 +227,37 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
 
   private async tasks(query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
     const now = this.now()
-    const data = await this.get('/tasks/v1/lists/@default/tasks', {
-      updatedMin: query.since,
-      showCompleted: 'false',
-      showHidden: 'false',
-      maxResults: String(query.limit),
+    // Google Tasks keeps only the due date (`due` is that date at 00:00:00Z).
+    // "Due soon" is therefore a due date from today through the end of the
+    // lookahead window in the owner's timezone, and such a task is fetched by
+    // its due date: it may have been last updated long before the cursor.
+    const timezone = query.timezone ?? 'UTC'
+    const firstDay = dayKey(now, timezone)
+    const lastDay = dayKey(now + query.lookaheadMinutes * 60_000, timezone)
+    const path = '/tasks/v1/lists/@default/tasks'
+    const page = { showCompleted: 'false', showHidden: 'false', maxResults: String(query.limit) }
+    const changed = await this.get(path, { ...page, updatedMin: query.since }, query.signal)
+    const dueWindow = await this.get(path, {
+      ...page,
+      // The bounds straddle the 00:00:00Z stamps, so inclusivity does not matter.
+      dueMin: new Date(Date.parse(`${firstDay}T00:00:00.000Z`) - 60_000).toISOString(),
+      dueMax: new Date(Date.parse(`${lastDay}T00:00:00.000Z`) + 60_000).toISOString(),
     }, query.signal)
     const drafts: ConnectorDraft[] = []
-    for (const item of arrayOf(data, 'items').slice(0, query.limit)) {
+    const seen = new Set<string>()
+    for (const item of [
+      ...arrayOf(changed, 'items').slice(0, query.limit),
+      ...arrayOf(dueWindow, 'items').slice(0, query.limit),
+    ]) {
       const task = record(item)
       const id = str(task.id)
-      if (!id) continue
+      if (!id || seen.has(id)) continue
+      seen.add(id)
       const due = str(task.due)
       const updatedAt = str(task.updated) ?? due ?? query.until
       const dueMs = due ? Date.parse(due) : Number.NaN
-      const soon = Number.isFinite(dueMs)
-        && dueMs >= now - 60_000
-        && dueMs <= now + query.lookaheadMinutes * 60_000
+      const dueDay = Number.isFinite(dueMs) ? new Date(dueMs).toISOString().slice(0, 10) : undefined
+      const soon = dueDay !== undefined && dueDay >= firstDay && dueDay <= lastDay
       const status = str(task.status) ?? 'needsAction'
       const wanted = soon && status !== 'completed'
       drafts.push({
