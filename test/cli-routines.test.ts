@@ -62,6 +62,38 @@ describe('ds-agent routines', () => {
     }])
   })
 
+  it('shows the timezone of a daily routine, and UTC when none is set', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'routines.json'), JSON.stringify([
+      { id: 'utc-brief', at: '08:00', prompt: 'Brief me.' },
+      { id: 'shanghai-brief', at: '08:00', days: [1, 2, 3, 4, 5], timezone: 'Asia/Shanghai', prompt: 'Brief me.' },
+    ]))
+    const result = runCli(home, ['routines'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('08:00 UTC days 0,1,2,3,4,5,6')
+    expect(result.stdout).toContain('08:00 Asia/Shanghai days 1,2,3,4,5')
+
+    const json = runCli(home, ['routines', '--json'])
+    expect(json.status, json.stderr).toBe(0)
+    const routines = JSON.parse(json.stdout) as Record<string, unknown>[]
+    expect(routines[0]).not.toHaveProperty('timezone')
+    expect(routines[1]).toMatchObject({ id: 'shanghai-brief', timezone: 'Asia/Shanghai' })
+  })
+
+  it('fails loudly on an unknown timezone and names the routine', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'routines.json'), JSON.stringify([{
+      id: 'morning',
+      at: '08:00',
+      timezone: 'Asia/Shangai',
+      prompt: 'Brief me.',
+    }]))
+    const result = runCli(home, ['routines'])
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('routine morning timezone')
+    expect(result.stderr).toContain('"Asia/Shangai"')
+  })
+
   it('says so when nothing is configured', () => {
     const result = runCli(tempHome(), ['routines'])
     expect(result.status, result.stderr).toBe(0)

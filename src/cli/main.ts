@@ -985,7 +985,7 @@ async function main(): Promise<void> {
     }
     for (const routine of routines) {
       const schedule = 'at' in routine
-        ? `${routine.at} UTC days ${routine.days.join(',')}`
+        ? `${routine.at} ${routine.timezone ?? 'UTC'} days ${routine.days.join(',')}`
         : `every ${routine.everyMinutes}m`
       console.log(
         `${routine.id.padEnd(24)}${schedule}  ${routine.source}:${routine.thread}  ${routine.prompt}`,

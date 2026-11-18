@@ -5,6 +5,7 @@ import path from 'node:path'
 import {
   loadRoutines,
   MAX_ROUTINES,
+  normalizeRoutines,
   RoutineScheduler,
   routineTrigger,
   type RoutineSpec,
@@ -322,6 +323,117 @@ describe('daily routine scheduling', () => {
     runner.tick(THURSDAY_1200)
     expect(runner.tick(THURSDAY_0800 - 60_000)).toEqual([])
     expect(fired).toEqual([])
+  })
+
+  /** Tick once a minute from `from` to `to` and return every fired slot; each must fire on time. */
+  function firedEachMinute(spec: RoutineSpec, from: number, to: number): string[] {
+    const { runner, fired } = runnerFor(spec)
+    for (let at = from; at <= to; at += 60_000) {
+      if (runner.tick(at).length) expect(fired.at(-1)?.at).toBe(new Date(at).toISOString())
+    }
+    return fired.map(trigger => trigger.at)
+  }
+
+  it('parses a timezone and leaves it out when none is given', () => {
+    const home = tempHome()
+    writeRoutines(home, [
+      { id: 'morning', at: '08:00', prompt: 'Brief me.' },
+      { id: 'zoned', at: '08:00', timezone: 'Asia/Kolkata', prompt: 'Brief me.' },
+    ])
+    const [plain, zoned] = loadRoutines(home)
+    expect(plain).not.toHaveProperty('timezone')
+    // Kept as written, although Intl reports this zone as Asia/Calcutta.
+    expect(zoned).toEqual(daily({ id: 'zoned', timezone: 'Asia/Kolkata' }))
+    expect(normalizeRoutines([zoned])).toEqual([zoned])
+  })
+
+  it('rejects an unknown timezone with the routine id, and a timezone on an interval', () => {
+    const home = tempHome()
+    for (const timezone of ['Mars/Olympus', 'Asia/Shangai', '', ' UTC', '+08:00', 8, null]) {
+      writeRoutines(home, [{ id: 'zoned', at: '08:00', timezone, prompt: 'Brief me.' }])
+      expect(() => loadRoutines(home), JSON.stringify(timezone))
+        .toThrow(/^routine zoned timezone must be an IANA time zone name/)
+    }
+    writeRoutines(home, [{ id: 'hourly', everyMinutes: 60, timezone: 'Asia/Shanghai', prompt: 'Check.' }])
+    expect(() => loadRoutines(home)).toThrow('routine hourly timezone only applies to an at schedule')
+  })
+
+  it('keeps UTC without a timezone, on the same slots as an explicit UTC zone', () => {
+    // Across the US spring-forward weekend (2026-03-08): UTC has no DST.
+    const from = Date.UTC(2026, 2, 6, 0, 0)
+    const to = Date.UTC(2026, 2, 10, 0, 0)
+    const plain = firedEachMinute(daily({ at: '02:30', days: [0, 1, 6] }), from, to)
+    expect(plain).toEqual(['2026-03-07T02:30:00.000Z', '2026-03-08T02:30:00.000Z', '2026-03-09T02:30:00.000Z'])
+    expect(firedEachMinute(daily({ at: '02:30', days: [0, 1, 6], timezone: 'UTC' }), from, to)).toEqual(plain)
+  })
+
+  it('keeps the persisted last run when a timezone is added', () => {
+    // Last fired Thursday 08:00 UTC, then moved to 08:00 Asia/Shanghai (00:00 UTC).
+    // Thursday's Shanghai slot is older than the last run, so nothing fires until Friday.
+    const lastRun = new Map([['morning', THURSDAY_0800]])
+    const fired: ReturnType<typeof routineTrigger>[] = []
+    const runner = new RoutineScheduler([daily({ timezone: 'Asia/Shanghai' })], {
+      now: () => 0,
+      lastRun: id => lastRun.get(id),
+      saveLastRun: (id, at) => { lastRun.set(id, at) },
+      fire: trigger => { fired.push(trigger) },
+    })
+    expect(runner.tick(THURSDAY_1200)).toEqual([])
+    expect(runner.tick(Date.UTC(2026, 10, 6, 0, 0))).toEqual(['morning'])
+    // Last fired at 08:00 New York (Thursday 13:00 UTC): by Saturday 02:00 UTC the
+    // Friday and Saturday Shanghai slots are both past; only the latest fires.
+    lastRun.set('morning', Date.UTC(2026, 10, 5, 13, 0))
+    expect(runner.tick(Date.UTC(2026, 10, 7, 2, 0))).toEqual(['morning'])
+    expect(runner.tick(Date.UTC(2026, 10, 7, 2, 1))).toEqual([])
+    expect(fired.map(trigger => trigger.at)).toEqual(['2026-11-06T00:00:00.000Z', '2026-11-07T00:00:00.000Z'])
+  })
+
+  it('reads at on the zone clock: Asia/Shanghai (+08:00) and Asia/Kolkata (+05:30)', () => {
+    const from = Date.UTC(2026, 10, 4, 12, 0)
+    const to = Date.UTC(2026, 10, 6, 12, 0)
+    expect(firedEachMinute(daily({ timezone: 'Asia/Shanghai' }), from, to))
+      .toEqual(['2026-11-05T00:00:00.000Z', '2026-11-06T00:00:00.000Z'])
+    expect(firedEachMinute(daily({ at: '09:00', timezone: 'Asia/Kolkata' }), from, to))
+      .toEqual(['2026-11-05T03:30:00.000Z', '2026-11-06T03:30:00.000Z'])
+  })
+
+  it('selects days by the weekday in the routine zone, not the UTC weekday', () => {
+    // Monday 07:00 in Shanghai is Sunday 23:00 UTC.
+    expect(firedEachMinute(
+      daily({ at: '07:00', days: [1], timezone: 'Asia/Shanghai' }),
+      Date.UTC(2026, 10, 7, 0, 0),
+      Date.UTC(2026, 10, 10, 0, 0),
+    )).toEqual(['2026-11-08T23:00:00.000Z'])
+    // Friday 21:00 in New York is Saturday 02:00 UTC; Thursday's 21:00 is a UTC Friday and must not fire.
+    expect(firedEachMinute(
+      daily({ at: '21:00', days: [5], timezone: 'America/New_York' }),
+      Date.UTC(2026, 10, 5, 0, 0),
+      Date.UTC(2026, 10, 8, 0, 0),
+    )).toEqual(['2026-11-07T02:00:00.000Z'])
+  })
+
+  it('fires a time skipped by spring forward once, after the jump (America/New_York)', () => {
+    // 2026-03-08: 02:00 EST jumps to 03:00 EDT, so 02:30 never shows on the clock.
+    expect(firedEachMinute(
+      daily({ at: '02:30', timezone: 'America/New_York' }),
+      Date.UTC(2026, 2, 7, 12, 0),
+      Date.UTC(2026, 2, 9, 12, 0),
+    )).toEqual([
+      '2026-03-08T07:30:00.000Z', // 03:30 EDT: the pre-change offset carried over
+      '2026-03-09T06:30:00.000Z', // 02:30 EDT
+    ])
+  })
+
+  it('fires a time repeated by fall back once, at its first occurrence (America/New_York)', () => {
+    // 2026-11-01: 02:00 EDT falls back to 01:00 EST, so 01:30 shows twice.
+    expect(firedEachMinute(
+      daily({ at: '01:30', timezone: 'America/New_York' }),
+      Date.UTC(2026, 9, 31, 12, 0),
+      Date.UTC(2026, 10, 2, 12, 0),
+    )).toEqual([
+      '2026-11-01T05:30:00.000Z', // 01:30 EDT; the 01:30 EST repeat (06:30Z) does not fire
+      '2026-11-02T06:30:00.000Z', // 01:30 EST
+    ])
   })
 })
 

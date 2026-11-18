@@ -1,9 +1,9 @@
 # Routines
 
 A routine is owner-defined recurring work: a prompt the agent receives every
-N minutes, or once per day at a UTC time on days you choose, on a channel you
-choose. The owner writes the schedule; the model has no tool to create, edit,
-or delete one.
+N minutes, or once per day at a time on days you choose (UTC, or a timezone
+you name), on a channel you choose. The owner writes the schedule; the model
+has no tool to create, edit, or delete one.
 
 The file is owner-controlled, not a sandbox boundary. A Worker that runs
 outside the normal write sandbox — a configured local specialist agent, an
@@ -36,6 +36,7 @@ the seed.
     "id": "morning-brief",
     "at": "08:00",
     "days": [1, 2, 3, 4, 5],
+    "timezone": "Asia/Shanghai",
     "prompt": "Summarize what changed in the repo since yesterday. Skip it if nothing changed."
   }
 ]
@@ -45,19 +46,52 @@ the seed.
 |---|---|---|
 | `id` | yes | Stable id (`^[a-z][a-z0-9_-]{0,31}$`). Also the persisted last-run key. |
 | `everyMinutes` | one of | Integer from 5 to 10080 (7 days). Mutually exclusive with `at`. |
-| `at` | one of | UTC `HH:MM`. Mutually exclusive with `everyMinutes`. |
-| `days` | no | Days for `at`: `0` Sunday through `6` Saturday. Default every day. |
+| `at` | one of | `HH:MM` (24-hour) in UTC, or in `timezone` when set. Mutually exclusive with `everyMinutes`. |
+| `days` | no | Days for `at`: `0` Sunday through `6` Saturday, in the same zone as `at`. Default every day. |
+| `timezone` | no | IANA timezone for `at` and `days`, such as `Asia/Shanghai` or `America/New_York`. Default UTC. Only with `at`. |
 | `prompt` | yes | What the owner wants done. Up to 4000 characters. |
 | `source` | no | Channel source: `cli` (default), `im`, `imessage`, `github`, or `a2a`. |
 | `thread` | no | Thread id in that source. Default `local`. |
 | `actor` | no | Actor id on the trigger. Default `you`. Use your allowlisted owner id when `DS_AGENT_ACTOR_ALLOWLIST` is set. |
 | `group` | no | Group id set as `channel.address.group`. Required for admission when `DS_AGENT_GROUP_ALLOWLIST` is active. |
 
-A routine has exactly one schedule: `everyMinutes` or `at`. Times are UTC, so
-the schedule does not depend on the host's local zone or DST rules.
+A routine has exactly one schedule: `everyMinutes` or `at`. A daily time is UTC
+unless the routine sets `timezone`. The host's local zone is never used, so
+moving the process to another machine does not move the schedule.
 
 Up to 32 routines. A malformed entry fails loudly at startup and in
 `ds-agent routines`; a typo must not silently mean the work never runs.
+
+## Timezones
+
+`timezone` names an IANA zone, such as `Asia/Shanghai`, `America/New_York`, or
+`Asia/Kolkata`. `at` and `days` are then read on that zone's clock, including
+the weekday: `"at": "07:00", "days": [1]` with `Asia/Shanghai` fires on Monday
+07:00 in Shanghai, which is Sunday 23:00 UTC.
+
+- Zone rules come from the time zone data built into Node (`Intl`); there is
+  no extra dependency. A name Node does not know, an empty string, or a UTC
+  offset such as `+08:00` fails at load with an error naming the routine.
+- `timezone` on an `everyMinutes` routine is rejected, like `days`: an
+  interval is elapsed time, so no zone changes it.
+- Without `timezone` the routine runs on UTC exactly as before. Adding or
+  changing `timezone` keeps the persisted last-run time: a slot in the new
+  zone fires only if it is later than that, and one that is already past fires
+  once on the next tick, like any missed slot.
+
+Across daylight saving changes, each selected local day still fires exactly
+once:
+
+- A time skipped when clocks spring forward fires after the jump, keeping the
+  offset from before the change. In `America/New_York`, `02:30` on the March
+  change day fires at 03:30 EDT (07:30 UTC).
+- A time that occurs twice when clocks fall back fires at its first occurrence
+  only. In `America/New_York`, `01:30` on the November change day fires at
+  01:30 EDT (05:30 UTC), not again at 01:30 EST.
+
+These are the RFC 5545 rules, and Temporal's default (`compatible`). The trigger
+time and trigger id stay the UTC instant that fired, so the dedupe and
+last-run rules below do not change.
 
 ## Scheduling semantics
 
@@ -112,9 +146,10 @@ ds-agent routines --json
 
 ## Current limits
 
-- Daily schedules are a UTC time plus weekdays, not a cron expression. Multiple
-  times per day need multiple routines. There is no per-routine timezone yet;
-  a UTC time is deliberate so the host zone cannot change the schedule.
+- Daily schedules are a time plus weekdays, not a cron expression. Multiple
+  times per day need multiple routines.
+- Zone rules are the ones in the running Node build. A newly announced DST
+  change applies once Node is updated.
 - No per-routine tool allowlist. A routine is framed by the normal rules and
   the Worker sandbox, not by a narrower capability set.
 - No catch-up policy choice. Firing once for a long gap is fixed behavior.
