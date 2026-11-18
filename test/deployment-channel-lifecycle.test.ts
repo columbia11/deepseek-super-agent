@@ -494,6 +494,93 @@ describe('deployment resident channel lifecycle', () => {
     await rt.finish()
   })
 
+  it('imessage loop does not re-ingest messages already coalesced into a durable trigger on replay', async () => {
+    // Not allowlisted: the triggers are stored as filtered. That keeps the
+    // test off the per-thread Router journal (a ':' file name Windows cannot
+    // create); persistence and replay are the same as for admitted triggers.
+    const rt = runtime()
+    rt.start()
+    rt.store.putDoc('imessage_cursor', 'cursor', { rowId: 5 })
+    const bob = '+15550000001'
+    const api = new FakeImessage([
+      aliceInbound(6, 'GUID-A', '第一句'),
+      aliceInbound(7, 'GUID-B', '第二句'),
+      aliceInbound(8, 'GUID-C', '第三句'),
+      { ...aliceInbound(9, 'GUID-D', '另一个人'), handle: bob, chatGuid: `iMessage;-;${bob}` },
+    ])
+    const ingested: string[] = []
+    const base = rt.ingestAsync.bind(rt)
+    const controller = new AbortController()
+    rt.ingestAsync = async (trigger: Trigger) => {
+      ingested.push(trigger.id)
+      const result = await base(trigger)
+      // Shutdown arrives while the coalesced burst is being ingested: the next
+      // trigger hits the abort branch and the cursor is intentionally kept.
+      if (trigger.id === 'imessage_GUID-A') controller.abort()
+      return result
+    }
+    await runImessageLoop({
+      runtime: rt,
+      source: new ImessageSource(api),
+      api,
+      dbPath: 'unused.db',
+      intervalMs: 5,
+      once: true,
+      signal: controller.signal,
+    })
+    expect(ingested).toEqual(['imessage_GUID-A'])
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-A')?.text).toBe('第一句\n第二句\n第三句')
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 5 })
+
+    // Restart: the replayed window must not turn B+C into a second trigger.
+    ingested.length = 0
+    await runImessageLoop({
+      runtime: rt,
+      source: new ImessageSource(api),
+      api,
+      dbPath: 'unused.db',
+      intervalMs: 5,
+      once: true,
+    })
+    expect(ingested).toEqual(['imessage_GUID-D'])
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-B')).toBeUndefined()
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 9 })
+    await rt.finish()
+  })
+
+  it('imessage loop replays a whole burst whose coalesced trigger was aborted before ingest', async () => {
+    const rt = runtime()
+    rt.start()
+    rt.store.putDoc('imessage_cursor', 'cursor', { rowId: 5 })
+    const api = new FakeImessage([
+      aliceInbound(6, 'GUID-A', '第一句'),
+      aliceInbound(7, 'GUID-B', '第二句'),
+    ])
+    const ingested: string[] = []
+    const base = rt.ingestAsync.bind(rt)
+    rt.ingestAsync = async (trigger: Trigger) => {
+      ingested.push(trigger.id)
+      return base(trigger)
+    }
+    const controller = new AbortController()
+    const pull = api.pull.bind(api)
+    api.pull = async (afterRowId: number) => {
+      const rows = await pull(afterRowId)
+      controller.abort()
+      return rows
+    }
+    const loop = { runtime: rt, api, dbPath: 'unused.db', intervalMs: 5, once: true }
+    await runImessageLoop({ ...loop, source: new ImessageSource(api), signal: controller.signal })
+    expect(ingested).toEqual([])
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 5 })
+
+    api.pull = pull
+    await runImessageLoop({ ...loop, source: new ImessageSource(api) })
+    expect(ingested).toEqual(['imessage_GUID-A'])
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-A')?.text).toBe('第一句\n第二句')
+    await rt.finish()
+  })
+
   it('imessage loop stops outbound flush timer after abort', async () => {
     const rt = runtime()
     rt.start()

@@ -26,6 +26,9 @@ import {
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
+/** Store kind mapping a coalesced message id to the trigger id it was folded into. */
+const COALESCED_KIND = 'imessage_coalesced'
+
 /** The pull surface `ImessageSource` implements; tests may inject a fake. */
 export interface ImessageLoopSource {
   pull(afterRowId: number): Promise<{
@@ -77,9 +80,13 @@ export type ImessageLoopStopReason = 'once' | 'aborted'
  * People text in bursts ("你猜怎么着" / "算了" / "不过..."). Feeding each line
  * to the Router separately produces several half-answers and makes replies look
  * out of order. Merge consecutive 1:1 messages from one sender into a single
- * trigger so the conversation gets one coherent turn.
+ * trigger so the conversation gets one coherent turn. When `absorbed` is
+ * given, it maps each merged trigger id to the ids folded into it.
  */
-export function coalesceTriggers(triggers: readonly Trigger[]): Trigger[] {
+export function coalesceTriggers(
+  triggers: readonly Trigger[],
+  absorbed?: Map<string, string[]>,
+): Trigger[] {
   const merged: Trigger[] = []
   for (const trigger of triggers) {
     const previous = merged.at(-1)
@@ -93,6 +100,7 @@ export function coalesceTriggers(triggers: readonly Trigger[]): Trigger[] {
     ) {
       previous.text = `${previous.text}\n${trigger.text}`
       previous.at = trigger.at
+      absorbed?.set(previous.id, [...(absorbed.get(previous.id) ?? []), trigger.id])
       continue
     }
     merged.push({ ...trigger })
@@ -176,13 +184,26 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
         // into that id would make `Runtime.ingest` treat the merged text as a
         // duplicate and silently keep the old text. Filtering first means the
         // new message keeps its own id. This mirrors `Runtime.duplicate`.
-        const fresh = pulled.triggers.filter(
-          trigger => runtime.store.getDoc<Trigger>('trigger', trigger.id) === undefined,
-        )
-        for (const trigger of coalesceTriggers(fresh)) {
+        // A message folded into an earlier trigger never gets its own trigger
+        // row, so it also counts as persisted once the trigger it was folded
+        // into is; otherwise a replay would split the burst into a second turn.
+        const persisted = (id: string): boolean =>
+          runtime.store.getDoc<Trigger>('trigger', id) !== undefined
+        const fresh = pulled.triggers.filter(trigger => {
+          if (persisted(trigger.id)) return false
+          const into = runtime.store.getDoc<{ into: string }>(COALESCED_KIND, trigger.id)?.into
+          return into === undefined || !persisted(into)
+        })
+        const absorbed = new Map<string, string[]>()
+        for (const trigger of coalesceTriggers(fresh, absorbed)) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[imessage] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
+            // Recorded before ingest so no crash window follows the commit;
+            // the filter above ignores a record whose target never committed.
+            for (const id of absorbed.get(trigger.id) ?? []) {
+              runtime.store.putDoc(COALESCED_KIND, id, { into: trigger.id })
+            }
             await ingestResidentTrigger(runtime, trigger, {
               limit: ingressLimit,
               signal: options.signal,
