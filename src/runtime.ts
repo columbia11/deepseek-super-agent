@@ -544,11 +544,12 @@ export class Runtime {
     // the redaction list so an accidental tool output or log line cannot
     // replay one; LocalEnv also scrubs them from bash/read_file results at any
     // length.
+    const fillVaultFile = opts.fillVault === undefined ? fillVaultPath(opts.home, baseEnv) : undefined
     const fillLoad: { vault?: FillVault; reason?: string } = opts.fillVault === false
       ? { reason: 'disabled' }
       : opts.fillVault
         ? { vault: opts.fillVault }
-        : loadFillVault(fillVaultPath(opts.home, baseEnv))
+        : loadFillVault(fillVaultFile!)
     const fillVault = fillLoad.vault
     let fillTarget: FillTarget | undefined
     let fillTargetReason: string | undefined
@@ -580,6 +581,9 @@ export class Runtime {
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), {
       env: baseEnv,
       ...(fillVault ? { redactValues: fillVault.redactionValues() } : {}),
+      // Redaction is literal; `base64 vault.json` would bypass it. The sandbox
+      // must refuse the file itself.
+      ...(fillVault && fillVaultFile ? { denyReadPaths: [fillVaultFile] } : {}),
     })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))

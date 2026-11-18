@@ -17,6 +17,11 @@ export interface SandboxPolicy {
   readIsolation?: boolean
   /** Extra host paths exposed read-only in strict mode (absolute paths). */
   readRoots?: readonly string[]
+  /**
+   * Host files the shell must never read, even under the default host-wide
+   * read rule (e.g. the fill vault). Absolute paths.
+   */
+  denyReadPaths?: readonly string[]
 }
 
 export interface SandboxSystem {
@@ -103,6 +108,10 @@ function darwinProfile(policy: SandboxPolicy, execPath: string): string {
     // Compatibility default: today's sandbox allows all host reads.
     lines.push('(allow file-read*)')
   }
+  // After the allow rules: in SBPL the later matching rule wins.
+  for (const file of new Set(policy.denyReadPaths ?? [])) {
+    lines.push(`(deny file-read* (literal ${sbplString(file)}))`)
+  }
   for (const dir of new Set(writes)) lines.push(`(allow file-write* (subpath ${sbplString(dir)}))`)
   lines.push('(allow file-write* (literal "/dev/null"))')
   lines.push(policy.allowNetwork ? '(allow network*)' : '(deny network*)')
@@ -171,8 +180,9 @@ export function wrapBashCommand(
     if (!system.available('bwrap')) {
       throw new UserError('worker bash requires bubblewrap (bwrap) on Linux')
     }
+    const exists = system.exists ?? existsSync
     const argv = policy.readIsolation
-      ? linuxStrictArgv(policy, system.exists ?? existsSync)
+      ? linuxStrictArgv(policy, exists)
       : [
         'bwrap',
         ...(policy.allowNetwork ? [] : ['--unshare-net']),
@@ -182,8 +192,13 @@ export function wrapBashCommand(
         ...(policy.writableRoots ?? []).flatMap(root => ['--bind', root, root]),
         '--',
       ]
+    // Mask denied files last so neither `/` nor a writable root re-exposes
+    // them. An absent file is skipped: bwrap cannot create a mount point there.
+    const masks = [...new Set(policy.denyReadPaths ?? [])]
+      .filter(file => exists(file))
+      .flatMap(file => ['--ro-bind', '/dev/null', file])
     return {
-      argv: [...argv, 'bash', '--noprofile', '--norc', '-c', command],
+      argv: [...argv.slice(0, -1), ...masks, '--', 'bash', '--noprofile', '--norc', '-c', command],
       wrapped: true,
     }
   }

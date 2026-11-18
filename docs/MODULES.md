@@ -423,8 +423,9 @@ FileVault names only; it is the env-injection store, not the fill store.
 and exposes entry
 names, kinds, field names, and a receipt but no read operation. `fill()` hands a
 value to a trusted `FillTarget` (a local helper via `DS_AGENT_FILL_COMMAND`, or
-an injected adapter), never returns it, and the Runtime adds its values to the
-redaction list at any length so `bash`/`read_file` cannot replay them. Missing,
+an injected adapter), never returns it, and the Runtime denies the loaded vault
+file to sandboxed `bash` (`seccomp.ts` `denyReadPaths`) and adds its values to
+the literal, best-effort redaction list at any length. Missing,
 insecure, or malformed config means no fill. The Worker tools `list_vault_entries`,
 `prepare_fill`, and `fill_credential` require an approved card whose exact action
 matches. `seccomp.ts` wraps every worker bash: `sandbox-exec` on

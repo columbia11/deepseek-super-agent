@@ -236,10 +236,16 @@ The UI is not a substitute for OS file permissions or full-disk encryption.
   and requires group/world permission bits to be clear (typically `0600`); it
   exposes names, kinds, field names, and a receipt,
   never a value. `fill()` calls a trusted `FillTarget`; missing or unsafe config
-  means fill is unavailable. The Runtime adds fill values to the redaction list
-  at any length, and `LocalEnv` scrubs them from `bash`/`read_file` output, so a
-  Worker that reads the config file still sees `[redacted]`. A fill also needs
-  an owner-approved card whose exact action text matches.
+  means fill is unavailable. The boundary is the Worker sandbox: when a vault
+  file is loaded, the Runtime denies that file to sandboxed `bash` (Darwin
+  `deny file-read*`, Linux `/dev/null` bind). The Runtime also adds fill values
+  to the redaction list at any length and `LocalEnv` scrubs them from
+  `bash`/`read_file` output, but that is literal best-effort only: an encoded
+  copy (`base64`, `xxd`) is not caught. An embedding that disables the sandbox
+  (`sandbox: { enabled: false }`) loses the file deny and can read the vault.
+  A failing fill helper's stdout/stderr are discarded; only its exit code is
+  reported. A fill also needs an owner-approved card whose exact action text
+  matches.
 - **Worker tool scope.** Executor tools exclude `reply_user`, `decide`, and
   `receive`; only the Router can speak or terminate (`src/harness/tools.ts:299`).
 

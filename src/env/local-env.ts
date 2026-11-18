@@ -19,10 +19,15 @@ export interface LocalEnvOptions {
   /** Secret names from the vault to inject into child processes. */
   vaultNames?: readonly string[]
   /**
-   * Extra values to scrub from bash/read output. The fill vault uses this so a
-   * Worker that cats the config file still cannot read a value back. Never log.
+   * Extra values to scrub from bash/read output at any length. Literal
+   * best-effort only: an encoded copy (base64, hex) is not caught. Never log.
    */
   redactValues?: readonly string[]
+  /**
+   * Host files sandboxed bash must not read (the fill vault file). This is the
+   * boundary; it does not apply when the sandbox is explicitly disabled.
+   */
+  denyReadPaths?: readonly string[]
   sandbox?: SandboxPolicy
   /**
    * Opt-in strict read confinement. Overrides `DS_AGENT_SANDBOX_READ_ISOLATION`
@@ -72,6 +77,7 @@ export class LocalEnv implements EnvPort {
       ...sandbox,
       readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
       readRoots: [...(sandbox.readRoots ?? []), ...(options.readRoots ?? [])],
+      denyReadPaths: withRealPaths([...(sandbox.denyReadPaths ?? []), ...(options.denyReadPaths ?? [])]),
     }
     const vaultSecrets = this.vault
       ? Object.values(this.vault.resolveForChild(this.vaultNames)).filter(
@@ -341,6 +347,20 @@ export class LocalEnv implements EnvPort {
 }
 
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
+
+/** Seatbelt matches resolved paths (`/tmp` -> `/private/tmp`); deny both forms. */
+function withRealPaths(files: readonly string[]): string[] {
+  const out = new Set<string>()
+  for (const file of files) {
+    out.add(file)
+    try {
+      out.add(fs.realpathSync(file))
+    } catch {
+      // Absent: the literal path is still denied.
+    }
+  }
+  return [...out]
+}
 
 function symlinkEscape(): UserError {
   return new UserError('path escapes workspace: symlinks are not allowed')

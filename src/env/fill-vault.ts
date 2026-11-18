@@ -302,8 +302,8 @@ export interface ProcessFillTargetOptions {
 /**
  * Adapter that hands a value to an owner-configured local helper over stdin.
  * No browser adapter is built in; this is the seam an owner can point at their
- * own automation. The helper must print nothing sensitive; even if it does,
- * its output is redacted before any error message leaves this class.
+ * own automation. Its stdout/stderr are discarded, so even a helper that echoes
+ * its input cannot put a value into an error message; only the exit code is kept.
  */
 export class ProcessFillTarget implements FillTarget {
   readonly label: string
@@ -332,18 +332,15 @@ export class ProcessFillTarget implements FillTarget {
 
   fill(field: FillField, value: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      // Helper output is discarded, never relayed: an echoed input line carries
+      // the value in an encoded form (JSON `\"`, a traceback repr) that no
+      // literal redaction can match. Only the exit code is reported.
       const child = spawn(this.command, this.args, {
         shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ['pipe', 'ignore', 'ignore'],
         env: this.env,
       })
-      let stdout = ''
-      let stderr = ''
       let settled = false
-      const cap = 16_384
-      const append = (current: string, chunk: Buffer): string =>
-        current.length >= cap ? current : (current + String(chunk)).slice(0, cap)
-      const clean = (text: string): string => text.split(value).join('[redacted]')
       const timer = setTimeout(() => child.kill('SIGKILL'), this.timeoutMs)
       const finish = (fn: () => void): void => {
         if (settled) return
@@ -351,18 +348,13 @@ export class ProcessFillTarget implements FillTarget {
         clearTimeout(timer)
         fn()
       }
-      child.stdout.on('data', chunk => { stdout = append(stdout, chunk) })
-      child.stderr.on('data', chunk => { stderr = append(stderr, chunk) })
       child.on('error', () => finish(() => reject(new UserError('fill helper could not start'))))
       child.on('close', code => finish(() => {
         if (code === 0) {
           resolve()
           return
         }
-        const hint = clean(`${stdout}\n${stderr}`).replace(/\s+/g, ' ').trim().slice(0, 200)
-        reject(new UserError(
-          `fill helper failed (exit ${code ?? 'signal'})${hint ? `: ${hint}` : ''}`,
-        ))
+        reject(new UserError(`fill helper failed (exit ${code ?? 'signal'})`))
       }))
       child.stdin.on('error', () => undefined)
       child.stdin.end(`${JSON.stringify({ field, value })}\n`)
