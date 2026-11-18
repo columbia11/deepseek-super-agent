@@ -16,6 +16,7 @@ const FORBIDDEN_PATH_RULES: readonly { re: RegExp; reason: string }[] = [
   { re: /sandbox-read-isolation/i, reason: 'sandbox policy' },
   { re: /bash-allow-network|bash-policy/i, reason: 'bash network policy' },
   { re: /^src\/vault\//, reason: 'vault' },
+  { re: /^src\/env\/vault\.ts$/, reason: 'vault' },
   { re: /^src\/channels\/vault/i, reason: 'vault' },
   { re: /credential-sentinel/i, reason: 'credential store' },
   { re: /^src\/env\/git-publish\.ts$/, reason: 'publish intermediary' },
@@ -54,13 +55,17 @@ function gitNameOnlyLines(workspace: string, args: readonly string[]): string[] 
     .filter(Boolean)
 }
 
-/** Paths that differ from baseline (commits, staged, and working tree). */
+/**
+ * Paths that differ from baseline (commits, staged, and working tree).
+ * `--no-renames`: a rename must report the old path too, or moving a protected
+ * file away hides it from the policy.
+ */
 export function changedPathsSinceRef(workspace: string, baseHead: string): string[] {
   const names = new Set<string>()
-  for (const rel of gitNameOnlyLines(workspace, ['diff', '--name-only', baseHead])) {
+  for (const rel of gitNameOnlyLines(workspace, ['diff', '--no-renames', '--name-only', baseHead])) {
     names.add(rel)
   }
-  for (const rel of gitNameOnlyLines(workspace, ['diff', '--cached', '--name-only', baseHead])) {
+  for (const rel of gitNameOnlyLines(workspace, ['diff', '--cached', '--no-renames', '--name-only', baseHead])) {
     names.add(rel)
   }
   return [...names]

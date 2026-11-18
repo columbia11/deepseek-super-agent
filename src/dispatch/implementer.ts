@@ -10,6 +10,8 @@ import type { GithubDispatchConfig } from './config.ts'
 import { assertImplementerDiffPolicy, type ImplementPathMode } from './diff-path-policy.ts'
 import {
   assertNoDeletedBaselineTests,
+  HOST_COMMAND_TIMEOUT_MS,
+  runHostCommandAsync,
   runImplementerHoldout,
 } from './holdout.ts'
 import { createJobRunner, type JobRunner } from './job-runner.ts'
@@ -41,7 +43,7 @@ export interface ClaudeGithubFixRunnerDeps {
   /** Resolved repo root to clone when sourceRepo is omitted (e.g. process.cwd()). */
   defaultSourceRepo?: string
   /** Test override for holdout verification. */
-  holdout?: (workspace: string, label: string, baseHead: string) => void
+  holdout?: (workspace: string, label: string, baseHead: string) => void | Promise<void>
 }
 
 export const CODING_DELEGATION_NOTE =
@@ -57,11 +59,11 @@ function resolveSourceCloneUrl(github: GithubDispatchConfig, defaultCwd: string)
   return cwd
 }
 
-function defaultHoldout(workspace: string, label: string, baseHead: string): void {
+async function defaultHoldout(workspace: string, label: string, baseHead: string): Promise<void> {
   if (label === 'publish') {
     assertNoDeletedBaselineTests(workspace, baseHead)
   }
-  runImplementerHoldout(workspace, label)
+  await runImplementerHoldout(workspace, label)
 }
 
 function buildCoderPrompt(ctx: GithubFixJobContext): string {
@@ -113,7 +115,7 @@ const defaultRunCoder: RunCoder = async input => {
     issueTitle: input.issueTitle,
     issueBody: input.issueBody,
   })
-  spawnClaudeCoder(input.workspace, prompt)
+  await spawnClaudeCoder(input.workspace, prompt)
 }
 
 const defaultRunRsiCoder: RunRsiCoder = async input => {
@@ -133,11 +135,11 @@ const defaultRunRsiCoder: RunRsiCoder = async input => {
       dedupeKey: '',
     },
   })
-  spawnClaudeCoder(input.workspace, prompt)
+  await spawnClaudeCoder(input.workspace, prompt)
 }
 
-function spawnClaudeCoder(workspace: string, prompt: string): void {
-  const child = spawnSync(
+async function spawnClaudeCoder(workspace: string, prompt: string): Promise<void> {
+  const child = await runHostCommandAsync(
     'claude',
     [
       '-p',
@@ -147,17 +149,12 @@ function spawnClaudeCoder(workspace: string, prompt: string): void {
       '--',
       prompt,
     ],
-    {
-      cwd: workspace,
-      encoding: 'utf8',
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 20 * 60 * 1000,
-    },
+    { cwd: workspace, timeoutMs: HOST_COMMAND_TIMEOUT_MS },
   )
   if (child.status !== 0) {
+    const detail = child.timedOut ? `timed out after ${HOST_COMMAND_TIMEOUT_MS} ms` : (child.stderr || child.stdout)
     throw new UserError(
-      `implementer: Claude Code exited ${child.status ?? 1}: ${(child.stderr ?? child.stdout ?? '').trim().slice(0, 600)}`,
+      `implementer: Claude Code exited ${child.status ?? 1}: ${detail.trim().slice(0, 600)}`,
     )
   }
 }
@@ -257,11 +254,11 @@ async function runIsolatedImplementPublish(
     seedWorkspaceCheckout(workspace, source)
     ensureLocalGitIdentity(workspace)
     const baseHead = gitRevParse(workspace, 'HEAD')
-    holdout(workspace, 'pre-change', baseHead)
+    await holdout(workspace, 'pre-change', baseHead)
 
     await input.runImplement(workspace)
 
-    holdout(workspace, 'publish', baseHead)
+    await holdout(workspace, 'publish', baseHead)
     spawnSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore', env: GIT_LOCAL_ENV })
     assertImplementerDiffPolicy(workspace, baseHead, input.mode)
 

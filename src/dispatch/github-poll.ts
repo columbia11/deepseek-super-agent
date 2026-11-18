@@ -65,6 +65,11 @@ function commentCreatedAfter(comment: GithubComment, seededAt: string): boolean 
   return comment.created_at >= seededAt
 }
 
+function issueChangedAfter(issue: GithubIssue, iso: string): boolean {
+  if (!issue.updated_at) return false
+  return Date.parse(issue.updated_at) > Date.parse(iso)
+}
+
 export function issueBodyDedupeId(issue: GithubIssue): string {
   return `issue-body:${issue.id}`
 }
@@ -171,6 +176,11 @@ export function processGithubPoll(
       }
       continue
     }
+
+    // The job runs on the issue body read at poll time, not the one the owner saw.
+    // Any body edit bumps issue.updated_at, so refuse when the issue changed after
+    // the command (also on a later comment/label; the owner can re-issue the command).
+    if (issueChangedAfter(ev.issue, ev.comment.created_at)) continue
 
     const job: DispatchJobDoc = {
       id: nextId('dispatch'),
