@@ -17,6 +17,7 @@ DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent chat "fix the login timeout"
 DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent memory
 DS_AGENT_SHARDS='[{"id":"github","filter":"source:github"}]' pnpm ds-agent chat "CI failed"
 pnpm bench:bakeoff                            # live model; dual vs single session
+pnpm bench:curve                              # offline MockModel; latency per load level
 ```
 
 ## M0 — shared
@@ -487,6 +488,19 @@ without `--force`, keeping the old database and WAL sidecars under
 - `pnpm bench:bakeoff` runs the same IM trigger through both modes with a live
   model and prints the comparison; `DS_AGENT_BAKEOFF_DEADLINE_MS` bounds each
   run (default 60 s).
+- `pnpm bench:curve [--loads 1,2,4,8,16]` prints end-to-end latency against
+  load (`src/cli/latency-curve.ts`; samples from `replyLatencies` in
+  `src/metrics/curve.ts`). Each load level N submits N addressed IM triggers on
+  N threads at once into a fresh Runtime with the `MockModel` fixture and
+  `DS_AGENT_*` settings removed from its environment. A sample runs from
+  `Runtime.ingest` to that trigger's `result` reply row in the Outbox (the Eval
+  acknowledgement does not count); each level reports `unanswered`, the
+  samples, `summarizeCurve` (count/p50/p95/max), and its counters. Limits: this
+  is an offline fixture run on one machine, not a benchmark. MockModel answers
+  instantly, so the curve shows Runtime queueing (Router sequencing, SQLite,
+  Worker tool calls, stdout logging), not model or network latency; numbers
+  vary with the host and between runs; there is no real channel; and nothing
+  about a live provider follows from it.
 
 ## T51 — security and privacy
 

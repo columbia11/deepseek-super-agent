@@ -3,9 +3,11 @@ export {
   curveSamples,
   normalizeCurveSamples,
   recordLatencySample,
+  replyLatencies,
   summarizeCurve,
   type CurveSampleSource,
   type CurveSummary,
+  type ReplyLedger,
 } from './curve.ts'
 export {
   METRIC_NAMES,

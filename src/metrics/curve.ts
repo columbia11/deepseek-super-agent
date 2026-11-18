@@ -1,11 +1,13 @@
+import type { Decision, OutboxRow, ReplyRow } from '../shared/types.ts'
 import type { MetricsSnapshot } from './metrics.ts'
 
 /**
- * T45 / PLAN §7: end-to-end latency curve.
+ * T45 / PLAN §7: latency curve samples and percentiles.
  *
  * Counters alone cannot answer "how slow is the slow tail?". This module keeps the
  * raw model-latency samples (optionally persisted as `curveSamples` in metrics.json)
  * and derives nearest-rank percentiles from them. It is pure: callers own storage.
+ * `replyLatencies` derives the end-to-end samples that `pnpm bench:curve` summarises.
  */
 
 /** Oldest samples are dropped once the list grows past this length. */
@@ -96,4 +98,31 @@ export function summarizeCurve(source: CurveSampleSource): CurveSummary {
     p95: percentile(samples, 95),
     max: samples[samples.length - 1]!,
   }
+}
+
+/** The persisted rows that link a Trigger to its reply in the Outbox. */
+export interface ReplyLedger {
+  decisions: readonly Pick<Decision, 'kind' | 'triggerIds' | 'ticketId'>[]
+  replies: readonly Pick<ReplyRow, 'id' | 'purpose'>[]
+  outbox: readonly Pick<OutboxRow, 'replyId' | 'ticketId' | 'createdAt'>[]
+}
+
+/**
+ * End-to-end milliseconds for each entered Trigger (id → epoch ms at ingress), in
+ * entry order. A Trigger is answered by the first Outbox row of a `result` reply on
+ * the Ticket its accept Decision opened; folded Triggers share it. The Eval
+ * acknowledgement is not the reply, and an unanswered Trigger has no sample.
+ */
+export function replyLatencies(entered: ReadonlyMap<string, number>, ledger: ReplyLedger): number[] {
+  const results = new Set(ledger.replies.filter(reply => reply.purpose === 'result').map(reply => reply.id))
+  const samples: number[] = []
+  for (const [triggerId, at] of entered) {
+    const ticketId = ledger.decisions
+      .find(decision => decision.kind === 'accept' && decision.triggerIds.includes(triggerId))?.ticketId
+    const row = ticketId === undefined
+      ? undefined
+      : ledger.outbox.find(item => item.ticketId === ticketId && results.has(item.replyId))
+    if (row) samples.push(Date.parse(row.createdAt) - at)
+  }
+  return samples
 }

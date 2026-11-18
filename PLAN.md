@@ -1106,7 +1106,7 @@ deepseek-super-agent/
 | §4.2 信道规范 | T33–T35 | 有 | channels/norms | 无 email 信道/来源，也未实现 `formatEmail`；email 不在范围内（适配器需扩展 ingress 与 norms） |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
-| §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
+| §7 实验 | T45 | 计数已做；端到端负载曲线已做（`pnpm bench:curve`） | `metrics/` | 曲线是离线 MockModel 单机测量，不是基准；真实模型与信道下的曲线未测 |
 | §8 未决 | T46–T51 + mid-task collab + T14 Team | T51 白名单+脱敏；中途 pause/intervene/resume（#31）；Team persist+CLI+e2e（#34） | `env/sanitize.ts` · `core/collab.ts` · `harness/team.ts` | vault/seccomp 仍外置 |
 
 **结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与扩展域服务（T09/T46–T50）已落地；这些服务现在由 Runtime 默认路径常驻装配（`runtime.routerShards` / `workerMesh` / `longTermMemory` / `lifecycle` / `a2aRouter`），不再有 `DS_AGENT_PHASE2` 或 `RuntimeOptions.phase2` 总开关。

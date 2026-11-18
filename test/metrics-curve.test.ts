@@ -2,11 +2,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { runEndToEndCurve } from '../src/cli/latency-curve.ts'
 import {
   recordLatencySample,
+  replyLatencies,
   summarizeCurve,
 } from '../src/metrics/curve.ts'
 import { compareBakeoff, type BakeoffSample } from '../src/metrics/bakeoff.ts'
+import { Store } from '../src/store/sqlite.ts'
 import {
   Metrics,
   emptySnapshot,
@@ -127,5 +130,64 @@ describe('T45 dual-layer vs single-session bake-off', () => {
     expect(cheaper.verdict).toContain('single-session paid')
     const zero = compareBakeoff(sample('dual', 2, 10), sample('single', 0, 10))
     expect(zero.ticketsPerCall.single).toBe(Number.POSITIVE_INFINITY)
+  })
+})
+
+describe('T45 end-to-end load curve', () => {
+  it('counts the first result reply in the Outbox, not the acknowledgement', () => {
+    const at = (ms: number) => new Date(ms).toISOString()
+    const entered = new Map([['t1', 1_000], ['t2', 1_010], ['t3', 1_020], ['t4', 1_030]])
+
+    const samples = replyLatencies(entered, {
+      decisions: [
+        { kind: 'accept', triggerIds: ['t1'], ticketId: 'ticket_a' },
+        // t2 and t3 folded into one Eval share the Ticket and its reply.
+        { kind: 'accept', triggerIds: ['t2', 't3'], ticketId: 'ticket_b' },
+        { kind: 'ignore', triggerIds: ['t4'] },
+      ],
+      replies: [
+        { id: 'r_ack_a', purpose: 'acknowledgement' },
+        { id: 'r_ack_b', purpose: 'acknowledgement' },
+        { id: 'r_res_b', purpose: 'result' },
+        { id: 'r_res_a', purpose: 'result' },
+        { id: 'r_res_b2', purpose: 'result' },
+      ],
+      outbox: [
+        { replyId: 'r_ack_a', ticketId: 'ticket_a', createdAt: at(1_001) },
+        { replyId: 'r_ack_b', ticketId: 'ticket_b', createdAt: at(1_011) },
+        { replyId: 'r_res_b', ticketId: 'ticket_b', createdAt: at(1_100) },
+        { replyId: 'r_res_a', ticketId: 'ticket_a', createdAt: at(1_200) },
+        { replyId: 'r_res_b2', ticketId: 'ticket_b', createdAt: at(1_300) },
+      ],
+    })
+
+    expect(samples).toEqual([200, 90, 80])
+  })
+
+  it('measures ingress to the Outbox result reply per load level through the Runtime', async () => {
+    const dir = tempDir()
+    let tick = Date.UTC(2026, 0, 1)
+    // Every clock read advances one second, so a sample counts clock reads, not wall time.
+    const levels = await runEndToEndCurve(dir, { loads: [3, 1, 3], clock: () => (tick += 1_000) })
+
+    expect(levels.map(level => level.load)).toEqual([1, 3])
+    for (const level of levels) {
+      expect(level.unanswered).toBe(0)
+      expect(level.samples).toHaveLength(level.load)
+      expect(level.samples.every(ms => ms > 0 && ms % 1_000 === 0)).toBe(true)
+      expect(level.latency).toEqual(summarizeCurve(level.samples))
+      expect(level.counters['ingress.admit']).toBe(level.load)
+      expect(level.counters['eval.accept']).toBe(level.load)
+
+      // Each level kept its own store: one Ticket and one result row in the Outbox per Trigger.
+      const store = new Store(path.join(dir, `load-${level.load}`))
+      try {
+        const results = new Set(store.listReplies().filter(reply => reply.purpose === 'result').map(reply => reply.id))
+        expect(store.listDocs('ticket')).toHaveLength(level.load)
+        expect(store.listOutbox().filter(row => results.has(row.replyId))).toHaveLength(level.load)
+      } finally {
+        store.close()
+      }
+    }
   })
 })
