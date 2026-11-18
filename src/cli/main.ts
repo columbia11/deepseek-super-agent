@@ -224,6 +224,9 @@ one start; otherwise the stored cursor for that chat seeds the poll, otherwise
 the source starts at now-5min. Feishu triggers keep the chat id in
 channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat; only a real
 bot mention sets addressed=mention, and group messages are never marked direct.
+DS_AGENT_FEISHU_P2P_DIRECT=1 is for a p2p chat only: a person's messages become
+addressed=direct without address.group (the allowlist then matches the chat id).
+Polled messages carry no chat type, so never set it when polling a group chat.
 --imessage and --feishu may be combined: both configurations are resolved before
 Runtime.create, one Runtime/SQLite store is shared, and each loop keeps its own
 AbortController, cursor, and outbox. If either configuration is absent or

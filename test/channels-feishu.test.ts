@@ -12,6 +12,7 @@ import {
   type FeishuConfig,
   type FeishuMessage,
 } from '../src/channels/feishu.ts'
+import { gateTriggers } from '../src/core/policy.ts'
 import { filterTrigger, ruleClassify } from '../src/ingress/filter.ts'
 import { admissionRulesFromEnv } from '../src/runtime.ts'
 import type { OutboxRow, Trigger } from '../src/shared/types.ts'
@@ -363,5 +364,102 @@ describe('Feishu client and outbox', () => {
       : { body: { code: 230002, msg: 'bot not in chat' } })
     const client = new FeishuClient(config, fn)
     await expect(client.sendText('oc_chat', 'hi')).rejects.toThrow(/230002/)
+  })
+})
+
+describe('DS_AGENT_FEISHU_P2P_DIRECT review fixes', () => {
+  async function withP2pDirect<T>(fn: () => T | Promise<T>): Promise<T> {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      return await fn()
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  }
+
+  function webhookEvent(chatType: string, chatId: string, senderId: string, text: string) {
+    return {
+      schema: '2.0',
+      header: { event_type: 'im.message.receive_v1', token: 'verify-me' },
+      event: {
+        sender: { sender_id: { open_id: senderId }, sender_type: 'user' },
+        message: {
+          message_id: `om_${chatType}`,
+          chat_id: chatId,
+          chat_type: chatType,
+          msg_type: 'text',
+          content: JSON.stringify({ text }),
+          create_time: '1761958800000',
+        },
+      },
+    }
+  }
+
+  it('does not mark the bot\'s own polled reply direct, so it cannot loop back as an explicit task', async () => {
+    const { fn } = fakeFetch((url, init) => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url, init)
+      return {
+        body: {
+          code: 0,
+          data: {
+            has_more: false,
+            items: [
+              message({ message_id: 'om_user', body: { content: JSON.stringify({ text: '你现在可以改了' }) } }),
+              message({
+                message_id: 'om_bot_reply',
+                create_time: '1761958860000',
+                sender: { id: 'cli_app', id_type: 'app_id', sender_type: 'app' },
+                body: { content: JSON.stringify({ text: '好的，我已经看过了，稍后给你一个完整的回复。' }) },
+              }),
+            ],
+          },
+        },
+      }
+    })
+    const source = new FeishuSource(new FeishuClient(config, fn), 'oc_chat', { sinceMs: 1761958000000, config })
+    const [user, own] = await withP2pDirect(() => source.pull())
+
+    expect(user!.addressed).toBe('direct')
+    expect(filterTrigger(user!, ruleSemantic)).toMatchObject({ action: 'pass', strength: 'explicit' })
+
+    expect(own!.human).toBe(false)
+    expect(own!.addressed).toBeUndefined()
+    expect(filterTrigger(own!, ruleSemantic)).toMatchObject({ action: 'drop' })
+    expect(gateTriggers([own!], undefined)).not.toMatchObject({ kind: 'accept', reason: 'explicit' })
+  })
+
+  it('never marks a webhook group message direct, even with the flag set', async () => {
+    await withP2pDirect(() => {
+      const group = parseFeishuWebhook(webhookEvent('group', 'oc_some_group', 'ou_mallory', '哈哈'), config).trigger!
+      expect(group.addressed).toBeUndefined()
+      expect(group.channel?.address?.group).toBe('oc_some_group')
+      expect(filterTrigger(group, ruleSemantic)).toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+
+      const p2p = parseFeishuWebhook(webhookEvent('p2p', 'oc_chat', 'ou_alice', '哈哈'), config).trigger!
+      expect(p2p.addressed).toBe('direct')
+      expect(p2p.channel?.address?.group).toBeUndefined()
+      expect(filterTrigger(p2p, ruleSemantic)).toMatchObject({ action: 'pass' })
+    })
+  })
+
+  it('keeps DS_AGENT_GROUP_ALLOWLIST=<chat id> admitting the p2p chat in direct mode', async () => {
+    await withP2pDirect(() => {
+      const allowed = admissionRulesFromEnv({ DS_AGENT_GROUP_ALLOWLIST: 'oc_chat' })
+      const trigger = feishuTriggerFromMessage(message({
+        body: { content: JSON.stringify({ text: '你现在可以改了' }) },
+      }), config)
+      expect(trigger.addressed).toBe('direct')
+      expect(filterTrigger(trigger, ruleSemantic, allowed)).toMatchObject({ action: 'pass' })
+
+      // Another chat is still denied by the same allowlist.
+      const other = feishuTriggerFromMessage(message({
+        chat_id: 'oc_other',
+        body: { content: JSON.stringify({ text: '你现在可以改了' }) },
+      }), config)
+      expect(filterTrigger(other, ruleSemantic, allowed))
+        .toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
+    })
   })
 })

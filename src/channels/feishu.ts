@@ -71,6 +71,8 @@ export interface FeishuMessage {
   message_id: string
   chat_id: string
   msg_type: string
+  /** `p2p` or `group`; present on webhook events, absent on message-list items. */
+  chat_type?: string
   body?: { content?: string }
   content?: string
   create_time: string
@@ -265,16 +267,22 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
   const text = flattenFeishuMessage(message)
   const thread = feishuThread(message.chat_id, message.thread_id)
   // Local ops flag for a verified p2p bind: treat as direct chat like CLI/iMessage 1:1.
-  // Keeps group allowlist usable when unset; when set, serve should rely on actor allowlist + single chat poll.
+  // A message that says it is not p2p (webhook `chat_type: 'group'`) keeps group semantics;
+  // message-list items carry no chat_type, so there the flag trusts the operator's p2p bind.
   const p2pDirect = process.env.DS_AGENT_FEISHU_P2P_DIRECT?.trim() === '1'
-  const addressed = mentionsBot(message, config) ? 'mention' as const : (p2pDirect ? 'direct' as const : undefined)
+    && (message.chat_type == null || message.chat_type === 'p2p')
   const senderType = message.sender?.sender_type
+  const human = senderType !== 'app' && senderType !== 'bot'
+  // Only a person is direct: the poll also returns the bot's own replies.
+  const addressed = mentionsBot(message, config)
+    ? 'mention' as const
+    : (p2pDirect && human ? 'direct' as const : undefined)
   return {
     id: `feishu_${message.message_id}`,
     source: 'im',
     threads: [{ source: 'im', id: thread }],
     actor: { source: 'im', id: message.sender?.id ?? 'unknown' },
-    human: senderType !== 'app' && senderType !== 'bot',
+    human,
     addressed,
     at: new Date(Number(message.create_time)).toISOString(),
     text,
@@ -285,7 +293,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
         provider: 'feishu',
         chat_id: message.chat_id,
         // Group admission reads only `address.group`; a Feishu chat is the group.
-        // For verified p2p direct mode, omit group so short chatter is not noise-dropped.
+        // For verified p2p direct mode, omit group so short chatter is not noise-dropped;
+        // DS_AGENT_GROUP_ALLOWLIST then matches `chat_id` (src/ingress/filter.ts).
         ...(p2pDirect ? {} : { group: message.chat_id }),
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
