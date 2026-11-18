@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process'
-import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import type { GithubRepoRef } from '../channels/github-source.ts'
 import type { GhRun } from '../channels/github-source.ts'
 import { runGh } from '../channels/github-source.ts'
@@ -24,7 +26,9 @@ export const runGit: GitRun = (args, opts) => new Promise((resolve, reject) => {
   const child = spawn('git', args, {
     cwd: opts.cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
+    // GIT_NO_LAZY_FETCH: upload-pack in the Worker repo must never start a
+    // promisor fetch driven by that repo's own remote config.
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
   })
   let stdout = ''
   let stderr = ''
@@ -83,35 +87,47 @@ export class FeaturePrPublisher {
     assertGitCommonDirInsideWorkspace(ws)
     const head = currentBranch(ws)
     const branch = normalizePeanutBranch(input.branch, head)
-    await this.ensureBranch(ws, branch)
-    const push = await this.git(
-      ['push', this.pushRemote, `HEAD:${branch}`],
-      { cwd: ws },
-    )
-    if (push.code !== 0) {
-      throw new UserError(`git push failed (exit ${push.code}): ${push.stderr.trim().slice(0, 400)}`)
+    // The Worker can write everything under `ws`, including `.git/hooks` and
+    // `.git/config` (pushInsteadOf, fsmonitor, credential.helper, ...). Never run
+    // checkout/push there: copy the Worker's HEAD commit into a host-private bare
+    // repo with a plain object fetch (upload-pack runs no hooks) and push from it.
+    const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-publish-'))
+    try {
+      await this.stageWorkspaceHead(ws, stage, branch)
+      const push = await this.git(
+        ['push', this.pushRemote, `HEAD:${branch}`],
+        { cwd: stage },
+      )
+      if (push.code !== 0) {
+        throw new UserError(`git push failed (exit ${push.code}): ${push.stderr.trim().slice(0, 400)}`)
+      }
+    } finally {
+      try {
+        fs.rmSync(stage, { recursive: true, force: true })
+      } catch {
+        /* cleanup best-effort */
+      }
     }
     const remote = `${this.repo.owner}/${this.repo.repo}`
     const { number, url } = await this.upsertPullRequest(branch, title, input.body)
     return { url, number, branch, remote }
   }
 
-  private async ensureBranch(ws: string, branch: string): Promise<void> {
-    const head = currentBranch(ws)
-    if (head !== branch) {
-      const co = await this.git(['checkout', '-B', branch], { cwd: ws })
-      if (co.code !== 0) {
-        throw new UserError(`git checkout failed: ${co.stderr.trim().slice(0, 300)}`)
-      }
+  /** Host-owned bare repo whose HEAD is `branch`, set to the Worker's HEAD commit. */
+  private async stageWorkspaceHead(ws: string, stage: string, branch: string): Promise<void> {
+    const init = await this.git(['init', '--bare', '--quiet', `--initial-branch=${branch}`], { cwd: stage })
+    if (init.code !== 0) {
+      throw new UserError(`git init failed (exit ${init.code}): ${init.stderr.trim().slice(0, 300)}`)
     }
-    try {
-      execSync('git rev-parse HEAD', {
-        cwd: ws,
-        stdio: 'ignore',
-        env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' },
-      })
-    } catch {
-      throw new UserError('publish refused: workspace has no commits to publish')
+    const fetch = await this.git(
+      ['fetch', '--quiet', '--no-tags', ws, `+HEAD:refs/heads/${branch}`],
+      { cwd: stage },
+    )
+    if (fetch.code !== 0) {
+      throw new UserError(
+        `publish refused: workspace has no commits to publish or is unreadable (git fetch exit ${fetch.code}): `
+        + fetch.stderr.trim().slice(0, 300),
+      )
     }
   }
 

@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import type {
   CollaborationView,
@@ -454,7 +455,11 @@ export class Runtime {
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
-    const workspaceSource = baseEnv.DS_AGENT_WORKSPACE_SOURCE_REPO?.trim() || process.cwd()
+    // Seed from cwd only when it is a git checkout; otherwise keep the plain empty
+    // workspace instead of failing every Worker tool on `git clone`.
+    const cwd = process.cwd()
+    const workspaceSource = baseEnv.DS_AGENT_WORKSPACE_SOURCE_REPO?.trim()
+      || (fs.existsSync(path.join(cwd, '.git')) ? cwd : undefined)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), {
       env: baseEnv,
       timeoutMs: parseBashTimeoutMs(baseEnv),
