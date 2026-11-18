@@ -273,7 +273,7 @@ function mainAgentTools(
     },
     {
       name: 'unsubscribe_worker',
-      description: 'Stop a ticket from following a thread. Does not requeue a trigger; use handback for that.',
+      description: 'Stop a ticket from following a thread. Does not requeue a trigger; only its Worker can hand one back.',
       parameters: schema({ ticketId: { type: 'string' }, thread: { type: 'string' }, reason: { type: 'string' } }),
       roles: ['router'],
       run: guard('router', 'unsubscribe_worker', async args => {
@@ -484,7 +484,7 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
     },
     {
       name: 'unsubscribe_thread',
-      description: 'Stop this ticket from following a thread. Does not requeue a trigger; use handback for that.',
+      description: 'Stop this ticket from following a thread. Does not requeue a trigger; use handback_trigger for that.',
       parameters: schema({ thread: { type: 'string' }, reason: { type: 'string' } }),
       roles: ['worker'],
       run: guard('worker', 'unsubscribe_thread', async (args, ctx) => {
@@ -492,6 +492,24 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const thread = String(args.thread ?? '')
         const removed = ports.unsubscribe(ctx.ticketId, thread, String(args.reason ?? 'worker-unsubscribe'))
         return { removed, ticketId: ctx.ticketId, thread }
+      }),
+    },
+    {
+      name: 'handback_trigger',
+      description: 'Hand a FOLLOWUP that is unrelated to this ticket back to Eval. This ticket stops following its thread; Eval decides where the trigger goes.',
+      parameters: schema({
+        triggerId: { type: 'string', description: 'The triggerId of the FOLLOWUP.' },
+        reason: { type: 'string', description: 'Why it is unrelated, one short line.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'handback_trigger', async (args, ctx) => {
+        // The session's own ticket hands back; a model-supplied ticket id is never read.
+        if (!ctx.ticketId) throw new UserError('handback_trigger needs a ticket')
+        const triggerId = String(args.triggerId ?? '').trim()
+        if (!triggerId) throw new UserError('handback_trigger needs a triggerId')
+        const reason = String(args.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || 'unrelated'
+        const requeued = ports.handback(ctx.ticketId, triggerId, reason)
+        return { requeued, ticketId: ctx.ticketId, triggerId }
       }),
     },
     {

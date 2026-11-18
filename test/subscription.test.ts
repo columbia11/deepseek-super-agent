@@ -1,12 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
 import { arbitrateSubscribers, bypassEligible } from '../src/core/intake.ts'
-import type { AssessmentOutcome } from '../src/shared/ports.ts'
+import { bindRolePorts } from '../src/core/role-ports.ts'
+import { currentTurn, MockModel, type Completion, type CompletionRequest } from '../src/harness/model.ts'
+import { workerSessionId } from '../src/harness/session.ts'
+import { ToolRegistry } from '../src/harness/tools.ts'
+import type { AssessmentOutcome, EnvPort } from '../src/shared/ports.ts'
 import { UserError } from '../src/shared/errors.ts'
 import type { Decision, Disposition, Thread, Ticket, Trigger } from '../src/shared/types.ts'
 import type { Runtime } from '../src/runtime.ts'
-import { freshRuntime, shutdown } from './fixtures.ts'
-import { ScriptedModel, silentModel } from './scripted-model.ts'
+import { freshRuntime, shutdown, tempHome } from './fixtures.ts'
+import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
 
 let runtime: Runtime | undefined
 
@@ -326,6 +330,330 @@ describe('subscription bypass', () => {
     await runtime.finish()
   })
 })
+
+describe('handback', () => {
+  const key = 'im:topic/bug-login'
+
+  function login(id: string, text = '@ds-agent login still 500, the timeout is back'): Trigger {
+    return imTrigger({ id, thread: 'topic/bug-login', text })
+  }
+
+  function ticketFrom(rt: Runtime, triggerId: string): Ticket | undefined {
+    return rt.store.listDocs<Ticket>('ticket').find(ticket => ticket.originTriggerId === triggerId)
+  }
+
+  /** Let the post-commit evaluation queued by a handback run. */
+  const settled = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+  it('refuses a trigger that did not reach the ticket as a fan-out follow-up', async () => {
+    runtime = freshRuntime({ model: silentModel() })
+    expect(runtime.ingest(login('trg_login', '@ds-agent please fix the login timeout on checkout'))).toBe('stored')
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_pay',
+      thread: 'topic/payments',
+      text: '@ds-agent please fix the payment timeout on checkout',
+    }))).toBe('stored')
+    const loginTicket = ticketFrom(runtime, 'trg_login')!
+    const payTicket = ticketFrom(runtime, 'trg_pay')!
+    runtime.engine.subscribe(payTicket.id, key, { contextOnly: true })
+    expect(runtime.ingest(login('trg_login_2'))).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_login_2'))
+      .toMatchObject({ fanout: [loginTicket.id], context: [payTicket.id] })
+    const before = runtime.store.getDoc<Thread>('thread', key)
+
+    const engine = runtime.engine
+    // Its own origin went through Eval; it never bypassed it.
+    expect(() => engine.handback(loginTicket.id, 'trg_login', 'probe')).toThrow(/did not reach ticket/)
+    // A context-only delivery never woke the ticket.
+    expect(() => engine.handback(payTicket.id, 'trg_login_2', 'probe')).toThrow(/did not reach ticket/)
+    // Another ticket's trigger.
+    expect(() => engine.handback(loginTicket.id, 'trg_pay', 'probe')).toThrow(UserError)
+
+    expect(runtime.store.getDoc<Thread>('thread', key)).toEqual(before)
+    for (const id of ['trg_login', 'trg_login_2', 'trg_pay']) {
+      expect(runtime.store.getDoc<Disposition>('disposition', id)?.handbacks).toBeUndefined()
+    }
+    expect(runtime.store.listEvents().some(event => event.type === 'trigger.requeued')).toBe(false)
+    await runtime.finish()
+  })
+
+  it('evaluates a handed-back trigger once, into a new ticket that cannot hand it back again', async () => {
+    runtime = freshRuntime({ model: silentModel() })
+    expect(runtime.ingest(login('trg_login', '@ds-agent please fix the login timeout on checkout'))).toBe('stored')
+    const original = ticketFrom(runtime, 'trg_login')!
+    expect(runtime.ingest(login('trg_login_2'))).toBe('stored')
+
+    const engine = runtime.engine
+    expect(engine.handback(original.id, 'trg_login_2', 'not-our-bug')).toBe(true)
+    expect(engine.handback(original.id, 'trg_login_2', 'again')).toBe(false)
+    expect(runtime.store.getDoc<Thread>('thread', key)?.pending).toEqual(['trg_login_2'])
+
+    // No further ingest: the Runtime evaluates the requeued trigger after the commit.
+    await settled()
+    const fresh = ticketFrom(runtime, 'trg_login_2')
+    expect(fresh).toBeDefined()
+    expect(fresh!.id).not.toBe(original.id)
+    expect(runtime.store.getDoc<Thread>('thread', key)).toMatchObject({ pending: [], subscriptions: [fresh!.id] })
+
+    // Neither a late repeat nor the new ticket returning its own origin requeues it.
+    expect(engine.handback(original.id, 'trg_login_2', 'again')).toBe(false)
+    expect(() => engine.handback(fresh!.id, 'trg_login_2', 'bounce')).toThrow(/did not reach ticket/)
+    await settled()
+    expect(runtime.store.getDoc<Thread>('thread', key)?.pending).toEqual([])
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_login_2')?.handbacks).toHaveLength(1)
+    expect(runtime.store.listDocs<Decision>('decision')
+      .filter(decision => decision.triggerIds.includes('trg_login_2'))
+      .map(decision => decision.kind)).toEqual(['accept'])
+    expect(runtime.store.listEvents().filter(event => event.type === 'trigger.requeued')).toHaveLength(1)
+    await runtime.finish()
+  })
+
+  it('requeues a shared follow-up only after every ticket it reached hands it back', async () => {
+    runtime = freshRuntime({ model: silentModel() })
+    const shared = 'im:topic/shared'
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_a',
+      thread: 'topic/shared',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))).toBe('stored')
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_b',
+      thread: 'topic/other',
+      text: '@ds-agent please fix the payment timeout on checkout',
+    }))).toBe('stored')
+    const first = ticketFrom(runtime, 'trg_a')!
+    const second = ticketFrom(runtime, 'trg_b')!
+    runtime.engine.subscribe(second.id, shared)
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_shared',
+      thread: 'topic/shared',
+      text: '@ds-agent the invoice export is broken too',
+    }))).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_shared')?.fanout.sort())
+      .toEqual([first.id, second.id].sort())
+
+    // The second ticket still holds it, so Eval must not open a duplicate yet.
+    expect(runtime.engine.handback(first.id, 'trg_shared', 'not mine')).toBe(false)
+    await settled()
+    expect(runtime.store.getDoc<Thread>('thread', shared)).toMatchObject({ subscriptions: [second.id], pending: [] })
+    expect(ticketFrom(runtime, 'trg_shared')).toBeUndefined()
+    expect(runtime.store.listEvents().some(event => event.type === 'trigger.requeued')).toBe(false)
+
+    expect(runtime.engine.handback(second.id, 'trg_shared', 'not mine either')).toBe(true)
+    await settled()
+    const fresh = ticketFrom(runtime, 'trg_shared')
+    expect(fresh).toBeDefined()
+    expect(runtime.store.getDoc<Thread>('thread', shared)).toMatchObject({ subscriptions: [fresh!.id], pending: [] })
+
+    // Neither ticket that returned it gets the thread's next follow-up.
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_next',
+      thread: 'topic/shared',
+      text: '@ds-agent the invoice export still fails',
+    }))).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_next')?.fanout).toEqual([fresh!.id])
+    await runtime.finish()
+  })
+
+  it('rolls back a handback that fails part-way', async () => {
+    runtime = freshRuntime({ model: silentModel() })
+    expect(runtime.ingest(login('trg_login', '@ds-agent please fix the login timeout on checkout'))).toBe('stored')
+    const ticket = ticketFrom(runtime, 'trg_login')!
+    expect(runtime.ingest(login('trg_login_2'))).toBe('stored')
+
+    const store = runtime.store
+    const addEvent = store.addEvent.bind(store)
+    const spy = vi.spyOn(store, 'addEvent').mockImplementation((type, payload) => {
+      if (type === 'subscription.removed') throw new Error('disk full')
+      addEvent(type, payload)
+    })
+    const engine = runtime.engine
+    expect(() => engine.handback(ticket.id, 'trg_login_2', 'not-our-bug')).toThrow('disk full')
+    spy.mockRestore()
+    await settled()
+
+    expect(store.getDoc<Thread>('thread', key)).toMatchObject({ subscriptions: [ticket.id], pending: [] })
+    expect(store.getDoc<Ticket>('ticket', ticket.id)?.threadKeys).toContain(key)
+    expect(store.getDoc<Disposition>('disposition', 'trg_login_2')?.handbacks).toBeUndefined()
+    expect(store.listEvents().some(event => event.type === 'trigger.requeued')).toBe(false)
+    expect(ticketFrom(runtime, 'trg_login_2')).toBeUndefined()
+
+    expect(engine.handback(ticket.id, 'trg_login_2', 'not-our-bug')).toBe(true)
+    await runtime.finish()
+  })
+
+  it('keeps a committed handback across a restart', async () => {
+    const home = tempHome()
+    const first = freshRuntime({ home, model: silentModel() })
+    // Engine commands only, so no Worker turn is in flight when the process stops.
+    first.engine.receive(login('trg_login', '@ds-agent please fix the login timeout on checkout'))
+    first.engine.evaluateDue()
+    const ticket = ticketFrom(first, 'trg_login')!
+    first.engine.receive(login('trg_login_2'))
+    expect(first.engine.handback(ticket.id, 'trg_login_2', 'not-our-bug')).toBe(true)
+    // Stop before the post-commit evaluation runs.
+    first.daemon.stop()
+    first.store.close()
+    await settled()
+
+    runtime = freshRuntime({ home, model: silentModel() })
+    expect(runtime.store.getDoc<Thread>('thread', key)).toMatchObject({ subscriptions: [], pending: ['trg_login_2'] })
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.threadKeys).not.toContain(key)
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_login_2')?.handbacks)
+      .toMatchObject([{ ticketId: ticket.id, reason: 'not-our-bug' }])
+    expect(runtime.engine.handback(ticket.id, 'trg_login_2', 'again')).toBe(false)
+
+    runtime.flushEvals()
+    expect(ticketFrom(runtime, 'trg_login_2')).toBeDefined()
+    expect(runtime.store.getDoc<Thread>('thread', key)?.pending).toEqual([])
+    await runtime.finish()
+  })
+
+  it('exposes handback_trigger to the Executor only, for its own ticket', async () => {
+    runtime = freshRuntime({ model: silentModel() })
+    expect(runtime.ingest(login('trg_login', '@ds-agent please fix the login timeout on checkout'))).toBe('stored')
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_pay',
+      thread: 'topic/payments',
+      text: '@ds-agent please fix the payment timeout on checkout',
+    }))).toBe('stored')
+    const loginTicket = ticketFrom(runtime, 'trg_login')!
+    const payTicket = ticketFrom(runtime, 'trg_pay')!
+    expect(runtime.ingest(login('trg_login_2'))).toBe('stored')
+    const tools = new ToolRegistry({
+      store: runtime.store,
+      ports: bindRolePorts(runtime.engine),
+      env: {} as EnvPort,
+      metrics: runtime.metrics,
+      redact: text => text,
+      log: () => {},
+      scheduleJob: () => {},
+      routerTurn: async () => {},
+    })
+    expect((await tools.specsFor('worker')).map(tool => tool.name)).toContain('handback_trigger')
+    expect((await tools.specsFor('router')).map(tool => tool.name)).not.toContain('handback_trigger')
+    expect((await tools.specsFor('watchdog')).map(tool => tool.name)).not.toContain('handback_trigger')
+
+    const call = (args: Record<string, unknown>) => ({ id: 'call_handback', name: 'handback_trigger', args })
+    const asWorker = (ticketId?: string) => ({
+      sessionId: workerSessionId(ticketId ?? 'none'),
+      role: 'worker' as const,
+      ...(ticketId ? { ticketId } : {}),
+    })
+    await expect(tools.invoke(call({ triggerId: 'trg_login_2' }), { sessionId: 'router_default', role: 'router' }))
+      .rejects.toThrow(/not available to router/)
+    await expect(tools.invoke(call({ triggerId: 'trg_login_2' }), { sessionId: 'watchdog', role: 'watchdog' }))
+      .rejects.toThrow(/not available to watchdog/)
+    await expect(tools.invoke(call({ triggerId: 'trg_login_2' }), asWorker())).rejects.toThrow(/needs a ticket/)
+    await expect(tools.invoke(call({}), asWorker(loginTicket.id))).rejects.toThrow(/needs a triggerId/)
+    // Another Worker cannot return this ticket's follow-up, even by naming the ticket.
+    await expect(tools.invoke(call({ triggerId: 'trg_login_2', ticketId: loginTicket.id }), asWorker(payTicket.id)))
+      .rejects.toThrow(/did not reach ticket/)
+    expect(runtime.store.getDoc<Thread>('thread', key)?.subscriptions).toEqual([loginTicket.id])
+
+    await expect(tools.invoke(
+      call({ triggerId: 'trg_login_2', reason: 'billing,\nnot login' }),
+      asWorker(loginTicket.id),
+    )).resolves.toEqual({ requeued: true, ticketId: loginTicket.id, triggerId: 'trg_login_2' })
+    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_login_2')?.handbacks)
+      .toMatchObject([{ ticketId: loginTicket.id, reason: 'billing, not login' }])
+    await runtime.finish()
+  })
+
+  it('end to end: the Executor hands an unrelated follow-up back and Eval opens a new ticket', async () => {
+    const model = new HandbackModel()
+    runtime = freshRuntime({ model, allowMockModel: true })
+    expect(runtime.ingest(login('trg_login', '@ds-agent please fix the login timeout on checkout'))).toBe('stored')
+    const original = ticketFrom(runtime, 'trg_login')!
+    expect(runtime.ingest(login('trg_invoice', '@ds-agent separately, the invoice export is broken'))).toBe('stored')
+    expect(runtime.log.text()).toContain(`bypass=subscription ticketId=${original.id} thread=${key} triggerId=trg_invoice`)
+
+    // The Worker read triggerId from its FOLLOWUP prompt and handed it back; the
+    // Runtime evaluated it without waiting for another ingest.
+    await within(model.handedBack, 10_000)
+    await settled()
+    const fresh = ticketFrom(runtime, 'trg_invoice')
+    expect(fresh).toBeDefined()
+    expect(fresh!.id).not.toBe(original.id)
+    await runtime.jobsSettled()
+
+    expect(model.results(original.id)).toEqual([
+      { requeued: true, ticketId: original.id, triggerId: 'trg_invoice' },
+      { requeued: false, ticketId: original.id, triggerId: 'trg_invoice' },
+    ])
+    // The new ticket's Executor cannot bounce its own origin back to Eval.
+    expect(model.results(fresh!.id)).toEqual([
+      { error: `trigger trg_invoice did not reach ticket ${fresh!.id} as a subscription follow-up` },
+    ])
+    const text = runtime.log.text()
+    expect(text).toContain(`[subscribe] handback ticketId=${original.id} triggerId=trg_invoice`)
+    expect(text).toContain(`Evals.batch thread=${key} size=1 triggerIds=trg_invoice`)
+    expect(text).toContain(`ExecutorSession=${workerSessionId(fresh!.id)} ticketId=${fresh!.id}`)
+    expect(runtime.store.listDocs<Ticket>('ticket')).toHaveLength(2)
+    expect(runtime.store.listDocs<Decision>('decision')
+      .filter(decision => decision.triggerIds.includes('trg_invoice'))
+      .map(decision => [decision.kind, decision.ticketId])).toEqual([['accept', fresh!.id]])
+    expect(runtime.store.getDoc<Thread>('thread', key)).toMatchObject({ subscriptions: [fresh!.id], pending: [] })
+    expect(runtime.store.getDoc<Ticket>('ticket', original.id)?.threadKeys).not.toContain(key)
+    await runtime.finish()
+  })
+})
+
+/**
+ * MockModel, except that a Worker hands back the follow-up about invoices
+ * (twice, so the repeat shows up) and the first ticket Eval opens for it tries
+ * to hand its own origin back. That bounce is tried once in total, so a broken
+ * guard fails the assertions instead of looping. Every other turn is MockModel.
+ */
+class HandbackModel extends MockModel {
+  private readonly seen: { ticketId: string; content: string }[] = []
+  private bounced = false
+  private resolveHandedBack: () => void = () => {}
+  readonly handedBack = new Promise<void>(resolve => {
+    this.resolveHandedBack = resolve
+  })
+
+  results(ticketId: string): unknown[] {
+    return this.seen.filter(item => item.ticketId === ticketId).map(item => JSON.parse(item.content) as unknown)
+  }
+
+  override async complete(request: CompletionRequest): Promise<Completion> {
+    const prompt = lastPrompt(request)
+    const followup = prompt.startsWith('FOLLOWUP') && field(prompt, 'text').includes('invoice')
+    const task = prompt.startsWith('TASK') && field(prompt, 'brief').includes('invoice')
+    if (request.role !== 'worker' || (!followup && !task)) return super.complete(request)
+    const ticketId = field(prompt, 'ticketId')
+    const last = request.messages.at(-1)
+    if (last?.role === 'tool' && last.name === 'handback_trigger') this.seen.push({ ticketId, content: last.content })
+    const done = currentTurn(request.messages)
+      .filter(message => message.role === 'tool' && message.name === 'handback_trigger').length
+    if (followup ? done < 2 : !this.bounced) {
+      if (!followup) this.bounced = true
+      return {
+        toolCalls: [{
+          id: `call_handback_${done}`,
+          name: 'handback_trigger',
+          args: { triggerId: followup ? field(prompt, 'triggerId') : 'trg_invoice', reason: 'invoices are not the login bug' },
+        }],
+      }
+    }
+    if (!followup) return super.complete(request)
+    this.resolveHandedBack()
+    return { text: 'handed back' }
+  }
+}
+
+async function within(promise: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`not settled within ${ms}ms`)), ms)
+  })
+  try {
+    await Promise.race([promise, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 describe('filtered triggers cannot be resurrected', () => {
   const key = 'im:topic/bug-login'

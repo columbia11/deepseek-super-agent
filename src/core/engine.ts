@@ -241,6 +241,7 @@ export class Engine {
     this.subscribe(ticketId, threadKey, { contextOnly: true })
   }
 
+  /** Return a fanned-out follow-up to Eval and stop following its thread. True when requeued. */
   handback(ticketId: string, triggerId: string, reason: string): boolean {
     return this.host.repo.atomic(() => handback(this.host, ticketId, triggerId, reason))
   }

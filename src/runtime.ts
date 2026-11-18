@@ -2033,6 +2033,9 @@ export class Runtime {
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
+    // Engine.handback runs inside Store.atomic. Evaluate the requeued Trigger
+    // once that commits, as an ingest would, instead of on the next ingest.
+    host.onRequeued = () => queueMicrotask(() => runtime.scheduleEval())
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.
     a2aRouter.register(instanceId, envelope => {

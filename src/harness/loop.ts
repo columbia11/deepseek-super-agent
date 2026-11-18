@@ -589,7 +589,7 @@ export class Harness {
     }
     const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
     const mode = ticket?.speculative ? 'speculative' : 'normal'
-    const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `mode=${mode}`, `text=${trigger.text}`]
+    const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `triggerId=${trigger.id}`, `mode=${mode}`, `text=${trigger.text}`]
     // Engine-owned spill only: the ingress sidecar, or the spill already on the ticket.
     const owned = spillId ?? ticket?.spillId ?? ''
     if (owned) lines.push(`spillId=${owned}`)

@@ -88,9 +88,13 @@ export interface WorkerPorts {
   /** Stop following a thread without requeueing a trigger (compare `handback`). */
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
   /**
-   * Requeue a trigger for Eval and stop following the thread.
-   * Throws `UserError` when ingress filtered the trigger; a denied trigger
-   * cannot be requeued without a fresh admission decision.
+   * Hand back a follow-up this ticket received through subscription fan-out:
+   * stop following the thread and requeue the trigger for Eval once every
+   * ticket it was fanned out to has handed it back. Returns true when requeued;
+   * a repeat by the same ticket returns false.
+   * Throws `UserError` when ingress filtered the trigger (a denied trigger
+   * cannot be requeued without a fresh admission decision) or when it did not
+   * reach this ticket as a fan-out follow-up.
    */
   handback(ticketId: string, triggerId: string, reason: string): boolean
   /**

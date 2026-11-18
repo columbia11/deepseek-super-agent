@@ -254,7 +254,7 @@ flowchart TB
 | T18 | Thread = 事件流 | §3.2 | M0+M2 | `Thread` + `trigger_thread` 表 |
 | T19 | Subscribe Fast Path bypass Router | §3.2 | M5 | 人消息达 Ticket → `bypass=subscription`；日志含 ticketId |
 | T20 | 多对多 Worker↔Thread | §3.2 | M5 | Subscriptions on Thread；`followForContext` |
-| T21 | Worker unsubscribe / handback | §3.2 | M5 | `markUnrelated` / `handback` → 回 Eval |
+| T21 | Worker unsubscribe / handback | §3.2 | M5 | Executor 工具 `handback_trigger` → `handback` → 回 Eval；仅限扇出到本 Ticket 的 follow-up，每个 Ticket 一次，全部接收方交还后才重新入队 |
 | T22 | Router 仍观察全局 | §3.2 | M3 | Intake 记 disposition；`Runtime.start()` 常驻 Router Session，`observe.*` 事件入 journal，assessment 读取 `routerSession` |
 | T23 | Inline & Spill 上下文缓存 | §3.3 | M6 | `inlineOrSpill(text, put, refs)`：窗口内保留 text/summary + spill id；refs 作为独立字段注入 task 并随 spill 持久化 |
 | T24 | Locality：ID+summary → neighbors → spill truncate+continue | §3.3 | M6 | `read_object` 分页 + `refs`；对象句柄 `kind:id` 可继续展开 |
@@ -1099,7 +1099,7 @@ deepseek-super-agent/
 | §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
 | §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding 已接线；T14/T15 部分（多话题 UX 由只读 UI 覆盖） |
 | §3.1 Fast/Slow | T16–T17 | 有 | ingress | Fast Path 确定性；Slow Path 可选模型策略（`DS_AGENT_SLOW_PATH=model`），超时/异常回退确定性规则 |
-| §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
+| §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | handback 未作为 CLI 操作暴露 |
 | §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object + graph refs | 多跳对象图已落地（Trigger/Thread/Ticket/Decision） |
 | §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |
 | §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |

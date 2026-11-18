@@ -215,10 +215,16 @@ Active rules are logged once at `Runtime.create` as
 
 ## M5 — subscribe
 
-`core/subscribe.ts` implements handback: it removes the ticket from the Thread,
-requeues the trigger for Eval, and drops `bypass=subscription` for that ticket.
+`core/subscribe.ts` implements handback, which an Executor reaches through the
+`handback_trigger` tool (the FOLLOWUP prompt carries the `triggerId`): it
+removes the ticket from the Thread, drops `bypass=subscription` for that
+ticket, and requeues the trigger for Eval once every ticket it was fanned out
+to has handed it back. The Runtime evaluates the requeue after the commit.
 It throws `UserError` for a trigger whose `Disposition.filtered` is defined
-instead of requeueing it (the requeue would bypass admission).
+instead of requeueing it (the requeue would bypass admission), and for a
+trigger that did not reach the ticket as a fan-out follow-up (its own origin,
+a context-only delivery, another ticket's trigger). A repeat by the same
+ticket is a no-op, so a trigger is requeued at most once.
 `intake.ts` handles fan-out, context-only subscriptions, and the human follow-up
 bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 

@@ -10,6 +10,11 @@ export interface Host {
   scope: SourceScope
   metrics: Metrics
   onQueued?: (threadKey: string, triggerId: string, pending: readonly string[]) => void
+  /**
+   * A handback put a Trigger back on the Eval queue. Called inside the Engine
+   * transaction; the host evaluates after it commits. Must not throw.
+   */
+  onRequeued?: (threadKey: string, triggerId: string) => void
   /** Lifecycle hook. Must not throw into the Engine transaction. */
   onTicketCreated?: (ticket: Ticket) => void
   /** Lifecycle hook for every terminal ticket path (deliver, discard, stop, fail). */
