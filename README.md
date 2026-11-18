@@ -442,7 +442,7 @@ Partial and owner-gated areas, stated plainly:
 - **Worker mesh** — placement is logical within this process; a remote transport exists, starts no listener, and is not yet connected to the local placement queue.
 - **Long-term memory** — hot/cold tiers and hybrid recall work; calendar-month behavior is bounded, not measured across real months.
 - **A2A** — HMAC-SHA256 HTTP transport is implemented; cross-host exposure and remote dispatch remain operator-gated.
-- **Watchdog drift checks** — nudge/fail, rules, and read-only `ds-agent health` work; deeper natural-language goal-drift checks are still thin.
+- **Watchdog drift checks** — nudge/fail, rules, and read-only `ds-agent health` work. Goal drift is marker-based by default; `DS_AGENT_WATCHDOG_DRIFT=model` opts into a model judgement of each new report against its Ticket, guided by the owner's `driftPolicy` prose in `src/watchdog/rules.json`, with a timeout and a marker fallback.
 - **Latency bake-off** — one dated local dual-layer versus single-session run is recorded in [docs/BAKEOFF.md](docs/BAKEOFF.md); it is a single sample, not a benchmark.
 
 ## Documentation

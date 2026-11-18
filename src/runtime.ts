@@ -72,6 +72,7 @@ import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
 import { threadKey, type Assignment, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
+import { resolveDriftCheck, type WatchdogDriftOptions } from './watchdog/drift.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
 
@@ -150,6 +151,13 @@ export interface RuntimeOptions {
    * `classifyPolicy`. Sync `ingest` always stays on rules.
    */
   slowPath?: SlowPathOptions
+  /**
+   * Opt-in model goal-drift check (T43). Default is marker rules only;
+   * `model` lets the Watchdog model judge each new report, with a timeout and
+   * the marker rules as fallback. Overrides `DS_AGENT_WATCHDOG_DRIFT` /
+   * `DS_AGENT_WATCHDOG_DRIFT_TIMEOUT_MS`.
+   */
+  watchdogDrift?: WatchdogDriftOptions
   /**
    * Long-term memory retention. Overrides `DS_AGENT_MEMORY_MAX_ENTRIES` /
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
@@ -1969,6 +1977,8 @@ export class Runtime {
       },
     })
     late.harness = harness
+    // T43 drift stays on the marker rules unless the owner opts into a model judgement.
+    const driftCheck = resolveDriftCheck(baseEnv, opts.watchdogDrift, models.watchdog ?? model, line => log.info(line))
     const watchdog = new Watchdog({
       store,
       engine,
@@ -1979,6 +1989,7 @@ export class Runtime {
       stuckMs: opts.stuckMs ?? 60_000,
       // A watchdog fail is a terminal path too: settle the speculative workdir.
       settle: (sessionId, verdict) => settleSpeculation(env, sessionId, verdict),
+      ...(driftCheck ? { drift: driftCheck } : {}),
     })
     const daemon = new Daemon(
       watchdog,

@@ -433,8 +433,14 @@ passes the same admission, filter, and rules as a message.
 
 `watchdog.ts` runs the timer, detects stalled assignments, repeated job
 failures, and marker-based goal drift (a running report that says it left the
-ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
-`rules.ts` + `rules.json` hold the NL-maintainable rules.
+ticket scope), and emits nudge/fail actions. `drift.ts` is the opt-in model
+drift check (`DS_AGENT_WATCHDOG_DRIFT=model` or `RuntimeOptions.watchdogDrift`):
+the Watchdog model judges each new report against the Ticket's title, brief,
+and scope, answers one JSON verdict within a timeout, and falls back to the
+markers on timeout, error, or invalid output. A verdict can only add or skip
+the one drift nudge. `health.ts` is the offline probe. `rules.ts` +
+`rules.json` hold the NL-maintainable rules, including the `driftPolicy` prose
+the model judges by.
 
 ## M11 — CLI and demo
 

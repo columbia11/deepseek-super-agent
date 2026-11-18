@@ -422,7 +422,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 - **Worker mesh**：放置是进程内的逻辑放置；远端 transport 已实现，但默认不监听，也尚未接入本地放置队列。
 - **长期记忆**：hot/cold 分层与混合召回可用；自然月尺度的行为有边界，尚未按真实月份测量。测量协议见 [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md)。
 - **A2A**：HMAC-SHA256 HTTP transport 已实现；跨主机暴露与远端 dispatch 仍需运维者开启。
-- **Watchdog 漂移检查**：nudge/fail、规则与只读 `ds-agent health` 可用；更深的自然语言目标漂移检查仍较薄。
+- **Watchdog 漂移检查**：nudge/fail、规则与只读 `ds-agent health` 可用。目标漂移默认按标记短语判断；`DS_AGENT_WATCHDOG_DRIFT=model` 可选启用模型判断：按 `src/watchdog/rules.json` 里 owner 维护的 `driftPolicy` 文字，对照 Ticket 审阅每条新报告，带超时，失败时回退到标记规则。
 - **延迟对照**：一次有日期记录的本机双层 vs 单 Session 运行见 [docs/BAKEOFF.md](docs/BAKEOFF.md)；这只是单个样本，不是基准测试。
 
 ## 文档

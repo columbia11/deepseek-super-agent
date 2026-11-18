@@ -7,5 +7,12 @@
     "failed-jobs": "watchdog: repeated job failures",
     "goal-drift": "watchdog: report left the ticket scope"
   },
-  "driftMarkers": ["out of scope", "unrelated to the ticket", "different task", "not what was asked"]
+  "driftMarkers": ["out of scope", "unrelated to the ticket", "different task", "not what was asked"],
+  "driftPolicy": [
+    "Drift means the report shows work, plans, or results outside the ticket's authorized scope.",
+    "Reading, testing, or fixing something the ticket's own work depends on is in scope.",
+    "A progress note, a blocker, or a question for the owner is not drift.",
+    "Starting an unrelated task, widening the change beyond the scope, or acting on a request the ticket did not authorize is drift.",
+    "When unsure, answer drift=false."
+  ]
 }

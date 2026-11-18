@@ -276,8 +276,8 @@ flowchart TB
 | T40 | Brain/hands；间歇设备 | §5.2 | M9+M1 | brain=Harness/Model；hands=Env；断线后 Store 续 |
 | T41 | Watchdog Session = 外部 Control Loop | §6 | M10 | 独立 `Role='watchdog'` Session |
 | T42 | Timer-driven | §6 | M10 | `setInterval` / due tick 表 |
-| T43 | Infra faults + task progress / goal drift | §6 | M10 | health + stalled Assignment + NL drift check |
-| T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
+| T43 | Infra faults + task progress / goal drift | §6 | M10 | `[x]` health + stalled Assignment + NL drift check：默认 `driftMarkers` 标记规则；`watchdog/drift.ts` 可选模型判断（`DS_AGENT_WATCHDOG_DRIFT=model`），结构化 JSON 输出，超时/异常/非法输出回退标记规则，只能决定是否 drift nudge |
+| T44 | NL maintainability prompts/rules | §6 | M10 | `[x]` `prompts/watchdog.md`；规则 JSON（`src/watchdog/rules.json`，含 owner 用文字维护的 `driftPolicy`） |
 | T45 | §7 实验指标 | §7 | M12 | counters + optional `curveSamples` / `summarizeCurve`（T45） |
 | T46 | §8 Router sharding | §8 | 扩展 | 同 T09；registry 常驻 Runtime |
 | T47 | §8 Worker mesh | §8 | 扩展 | `[~]` 本地 `WorkerMeshRegistry`（容量/队列）+ `RemoteMeshRegistry`/`MeshInbox`（A2A HMAC 传输、心跳、上限、loopback 默认拒绝；`src/harness/remote-node.ts`）。无默认 Runtime 监听器，远程 dispatch 接线仍属 operator-gated |
@@ -824,9 +824,9 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/watchdog/` |
-| Files | `watchdog.ts`, `health.ts`, `rules.ts`, `rules.json`, `index.ts` |
+| Files | `watchdog.ts`, `drift.ts`, `health.ts`, `rules.ts`, `rules.json`, `index.ts` |
 | Timer | `Watchdog` 由 `Daemon` 按 `intervalMs` 驱动；Runtime 默认 15s（`RuntimeOptions.watchdogIntervalMs`） |
-| Detect | `stuckAssignments` / `stuckSessions` / `driftAssignments`：卡住、job 连续失败 N 次、规则标记的 scope 漂移 |
+| Detect | `stuckAssignments` / `stuckSessions` / `driftAssignments`：卡住、job 连续失败 N 次、规则标记的 scope 漂移；可选 `DriftCheck`（`DS_AGENT_WATCHDOG_DRIFT=model`）由 Watchdog 模型按 `driftPolicy` 判断新报告是否离开 Ticket scope，失败回退标记规则 |
 | Actions | `nudge` 写入 Session journal；`fail` 走 Engine report；不直接对外发言 |
 | Session | 默认规则引擎；需要时可用 `Harness.watchdogTurn()` 跑独立 `Role='watchdog'` turn |
 | Tests | 卡住 Worker 被 nudge；三次后 fail |
@@ -1105,7 +1105,7 @@ deepseek-super-agent/
 | §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |
 | §4.2 信道规范 | T33–T35 | 有 | channels/norms | 无 email 信道/来源，也未实现 `formatEmail`；email 不在范围内（适配器需扩展 ingress 与 norms） |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
-| §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
+| §6 Watchdog | T41–T44 | 有 | watchdog | NL 漂移判断可选（`DS_AGENT_WATCHDOG_DRIFT=model`），默认仍为标记规则；判断标准在 `rules.json` 的 `driftPolicy` 文字里维护 |
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
 | §8 未决 | T46–T51 + mid-task collab + T14 Team | T51 白名单+脱敏；中途 pause/intervene/resume（#31）；Team persist+CLI+e2e（#34） | `env/sanitize.ts` · `core/collab.ts` · `harness/team.ts` | vault/seccomp 仍外置 |
 
